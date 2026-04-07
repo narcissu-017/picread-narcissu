@@ -1,80 +1,82 @@
 # PicRead
 
-PicRead 是一个用于批量审阅图片和 GIF 的多窗口平铺工具。
+[![English](https://img.shields.io/badge/README-English-2d6cdf?style=for-the-badge)](README.md) [![简体中文](https://img.shields.io/badge/%E8%AF%B4%E6%98%8E-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2d6cdf?style=for-the-badge)](README.zh-CN.md)
 
-它适合这些场景：
-- 同时查看大量图片/GIF
-- 在尽量不浪费桌面空间的前提下对比素材
-- 保持图片原始顺序和宽高比进行审阅
-- 为不同题材、项目或批次保存模板，重复打开使用
-- 其实最大的作用是方便你用你巨大的屏幕，自动平铺各种你精选的图片、动图即刻起飞
+PicRead is a multi-window tiling viewer for reviewing large numbers of images and GIFs.
 
-## 本版本主要功能
-- 多窗口组同时打开
-- 支持 PNG、JPG、JPEG、BMP、WEBP、GIF
-- GIF 播放与静态图混合查看
-- 保持宽高比自动平铺
-- 固定行数排版与智能排版
-- 组内拖动调整顺序
-- 多选后批量移除图片
-- 模板库、历史记录、会话保存
-- 模板打开、更新、重新加载、删除
-- 合并窗口组
-- 拖拽导入图片
-- 独立性能模式与调参面板
+It works especially well when you want to:
+- compare many images or GIFs at once
+- make better use of a large monitor without wasting too much desktop space
+- keep the original order and aspect ratio of your images while reviewing
+- save reusable templates for different projects, themes, or batches
+- and, honestly, use your giant screen to tile your hand-picked images and animated clips so you can get going right away
 
-## 下载与使用
-仓库内已附带可直接运行的发布版：
+## Features
+- Multiple window groups at the same time
+- Supports PNG, JPG, JPEG, BMP, WEBP, and GIF
+- Mixed viewing of still images and animated GIFs
+- Automatic tiling while preserving aspect ratio
+- Fixed-row layout and smart layout
+- Drag to reorder items inside a group
+- Multi-select and batch remove
+- Template library, history, and session saving
+- Open, update, reload, and delete templates
+- Merge window groups
+- Drag and drop image import
+- Performance modes and tuning panel
+
+## Download and Use
+A ready-to-run build is included in this repository:
 - `dist/PicRead.exe`
 
-使用说明：
-- 直接运行 EXE 不需要提前安装 Python
-- 首次运行时，程序会在 `dist/state/` 下自动生成自己的本地状态目录
-- 如果你把 EXE 移动到别的位置，建议把整个 `dist` 目录一起移动，避免状态文件分散
+Usage notes:
+- Running the EXE does not require Python to be installed.
+- On first launch, the app creates its own local state folder under `dist/state/`.
+- If you move the EXE, it is best to move the entire `dist` folder together.
 
-## 从源码运行
-环境要求：
+## Run from Source
+Environment:
 - Windows 10/11
-- Python 3.12 或相近版本
+- Python 3.12 or a nearby version
 
-安装依赖：
+Install dependencies:
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-启动：
+Run:
 ```powershell
 python app.py
 ```
 
-也可以双击：
+Or double-click:
 - `start_picread.bat`
 
-## 基本使用
-1. 启动程序后先创建窗口组。
-2. 拖拽图片或 GIF 到窗口组中，或使用界面按钮导入。
-3. 根据需要切换固定排版或智能排版。
-4. 在窗口组中拖动图片即可调整顺序。
-5. 右键或按 `Delete` 可从当前窗口组移除图片。
-6. 模板库可用于保存和重复打开常用图片组。
-7. 历史记录可快速恢复之前的查看状态。
+## Basic Usage
+1. Start the app and create a window group.
+2. Drag images or GIFs into the window group, or import them through the UI.
+3. Switch between fixed layout and smart layout as needed.
+4. Drag items inside a group to reorder them.
+5. Right-click or press `Delete` to remove selected items from the current group.
+6. Use the template library to save and reopen common image sets.
+7. Use history to restore recent viewing states.
 
-## 模板与历史
-- 模板：适合保存常用图片组合、顺序和排版设置。
-- 历史：适合恢复最近使用状态。
-- 这些内容默认写到本地 `state/` 目录，不会影响原始图片文件。
+## Templates and History
+- Templates are useful for saving common image combinations, order, and layout settings.
+- History is useful for restoring recent working states.
+- These are stored locally in the `state/` folder and do not modify the original files.
 
-## 算法说明
-本仓库附带了独立的排版算法说明文档：
+## Layout Algorithm Notes
+This repository includes a separate layout algorithm document:
 - `docs/layout_algorithms.md`
 
-里面说明了当前主要排版算法的设计目标、核心思路和关键代码片段，方便继续迭代和交流。
+It explains the current layout strategies, their goals, and the core implementation ideas with code snippets.
 
-## 想请教和征集建议
-目前智能排版已经能满足日常使用，但我相信还有继续优化的空间，尤其是在：
-- 空间利用率
-- 横竖图混排效果
-- 大量图片/GIF 时的稳定性
-- 不同窗口尺寸下的布局自然度
+## Feedback and Algorithm Improvements
+The current smart layout is already practical for daily use, but there is still room for improvement, especially around:
+- space utilization
+- mixed horizontal and vertical image layouts
+- stability with large batches of images and GIFs
+- more natural behavior across different window sizes
 
-如果有大佬愿意帮忙一起看看、更进一步优化算法，非常欢迎交流和建议。
+If anyone would like to help improve the layout algorithms even further, suggestions and contributions are very welcome.
