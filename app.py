@@ -28,18 +28,43 @@ except Exception:
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 else:
     APP_DIR = Path(__file__).resolve().parent
+    RESOURCE_DIR = APP_DIR
 STATE_DIR = APP_DIR / "state"
 TEMPLATE_DIR = STATE_DIR / "templates"
 HISTORY_DIR = STATE_DIR / "history"
 THUMB_CACHE_DIR = STATE_DIR / "thumbs"
+I18N_DIR = RESOURCE_DIR / "i18n"
 SESSION_FILE = STATE_DIR / "session.json"
 UI_STATE_FILE = STATE_DIR / "ui_state.json"
 CACHE_LIMIT = 2200
 THUMB_CACHE_LIMIT = 280
-ICON_ICO_PATH = APP_DIR / "assets" / "picread_icon.ico"
-ICON_PNG_PATH = APP_DIR / "assets" / "picread_icon.png"
+ICON_ICO_PATH = RESOURCE_DIR / "assets" / "picread_icon.ico"
+ICON_PNG_PATH = RESOURCE_DIR / "assets" / "picread_icon.png"
+LOAD_PROFILES = {
+    "低负载": {
+        "cache_limit": 2200,
+        "budget_scale": 1.0,
+        "memory_hint_gb": 7,
+    },
+    "中负载": {
+        "cache_limit": 5200,
+        "budget_scale": 1.35,
+        "memory_hint_gb": 16,
+    },
+    "高负载": {
+        "cache_limit": 7800,
+        "budget_scale": 1.7,
+        "memory_hint_gb": 24,
+    },
+    "极限负载": {
+        "cache_limit": 12800,
+        "budget_scale": 2.35,
+        "memory_hint_gb": 40,
+    },
+}
 PERF_MODES = {
     "高画质": {
         "tick_ms": 16,
@@ -83,6 +108,10 @@ RESAMPLE_NAME_TO_VALUE = {
     "BILINEAR": Image.Resampling.BILINEAR,
 }
 RESAMPLE_VALUE_TO_NAME = {v: k for k, v in RESAMPLE_NAME_TO_VALUE.items()}
+LANGUAGE_OPTIONS = {
+    "zh_CN": "简体中文",
+    "en_US": "English",
+}
 
 
 class Win32DropManager:
@@ -204,6 +233,104 @@ class Win32DropManager:
         return files
 
 
+class BoxToggle(tk.Frame):
+    def __init__(
+        self,
+        master,
+        text: str,
+        variable,
+        *,
+        command=None,
+        bg: str,
+        fg: str,
+        accent: str,
+        box_size: int = 18,
+        font=("Microsoft YaHei UI", 11),
+    ):
+        super().__init__(master, bg=bg, bd=0, highlightthickness=0)
+        self.variable = variable
+        self.command = command
+        self.bg = bg
+        self.fg = fg
+        self.accent = accent
+        self.box_size = box_size
+        self.canvas = tk.Canvas(self, width=box_size, height=box_size, bg=bg, highlightthickness=0, bd=0)
+        self.canvas.pack(side=tk.LEFT, padx=(0, 8))
+        self.label = tk.Label(self, text=text, bg=bg, fg=fg, font=font)
+        self.label.pack(side=tk.LEFT)
+        self.bind("<Button-1>", self._toggle)
+        self.canvas.bind("<Button-1>", self._toggle)
+        self.label.bind("<Button-1>", self._toggle)
+        self._trace_id = self.variable.trace_add("write", lambda *_: self._redraw())
+        self._redraw()
+
+    def _toggle(self, _evt=None) -> None:
+        self.variable.set(not bool(self.variable.get()))
+        if self.command:
+            self.command()
+
+    def _redraw(self) -> None:
+        s = self.box_size
+        self.canvas.delete("all")
+        self.canvas.create_rectangle(1, 1, s - 1, s - 1, outline="#cfcfcf", width=1, fill=self.bg)
+        if bool(self.variable.get()):
+            self.canvas.create_rectangle(3, 3, s - 3, s - 3, outline=self.accent, width=1, fill=self.accent)
+            self.canvas.create_line(5, s // 2, s // 2 - 1, s - 5, fill="#ffffff", width=2)
+            self.canvas.create_line(s // 2 - 1, s - 5, s - 4, 5, fill="#ffffff", width=2)
+
+    def set_text(self, text: str) -> None:
+        self.label.configure(text=text)
+
+
+class DotRadio(tk.Frame):
+    def __init__(
+        self,
+        master,
+        text: str,
+        variable,
+        value: str,
+        *,
+        command=None,
+        bg: str,
+        fg: str,
+        accent: str,
+        box_size: int = 18,
+        font=("Microsoft YaHei UI", 11),
+    ):
+        super().__init__(master, bg=bg, bd=0, highlightthickness=0)
+        self.variable = variable
+        self.value = value
+        self.command = command
+        self.bg = bg
+        self.fg = fg
+        self.accent = accent
+        self.box_size = box_size
+        self.canvas = tk.Canvas(self, width=box_size, height=box_size, bg=bg, highlightthickness=0, bd=0)
+        self.canvas.pack(side=tk.LEFT, padx=(0, 8))
+        self.label = tk.Label(self, text=text, bg=bg, fg=fg, font=font)
+        self.label.pack(side=tk.LEFT)
+        self.bind("<Button-1>", self._select)
+        self.canvas.bind("<Button-1>", self._select)
+        self.label.bind("<Button-1>", self._select)
+        self._trace_id = self.variable.trace_add("write", lambda *_: self._redraw())
+        self._redraw()
+
+    def _select(self, _evt=None) -> None:
+        self.variable.set(self.value)
+        if self.command:
+            self.command()
+
+    def _redraw(self) -> None:
+        s = self.box_size
+        self.canvas.delete("all")
+        self.canvas.create_oval(1, 1, s - 1, s - 1, outline="#cfcfcf", width=1, fill=self.bg)
+        if str(self.variable.get()) == str(self.value):
+            self.canvas.create_oval(5, 5, s - 5, s - 5, outline=self.accent, width=1, fill=self.accent)
+
+    def set_text(self, text: str) -> None:
+        self.label.configure(text=text)
+
+
 @dataclass
 class ImageItem:
     path: Path
@@ -313,11 +440,11 @@ class GroupWindow:
         self._resizing_until = 0.0
 
         self._menu = tk.Menu(self.top, tearoff=0)
-        self._menu.add_command(label="从窗口组移除图片", command=self._remove_context_item)
+        self._menu.add_command(label=self.app.tr("menu.remove_image", "从窗口组移除图片"), command=self._remove_context_item)
         self._menu.add_separator()
-        self._menu.add_command(label="保存为模板", command=self._save_as_template_here)
-        self._menu.add_command(label="更新该模板", command=self._update_template_here)
-        self._menu.add_command(label="重新加载模板", command=self._reload_template_here)
+        self._menu.add_command(label=self.app.tr("button.save_template", "保存为模板"), command=self._save_as_template_here)
+        self._menu.add_command(label=self.app.tr("button.update_template", "更新该模板"), command=self._update_template_here)
+        self._menu.add_command(label=self.app.tr("button.reload_template", "重新加载模板"), command=self._reload_template_here)
 
         self._update_title()
         self._last_geometry = self.top.geometry()
@@ -337,6 +464,12 @@ class GroupWindow:
     def _update_title(self) -> None:
         self.top.title(self.name)
 
+    def refresh_localized_texts(self) -> None:
+        self._menu.entryconfigure(0, label=self.app.tr("menu.remove_image", "从窗口组移除图片"))
+        self._menu.entryconfigure(2, label=self.app.tr("button.save_template", "保存为模板"))
+        self._menu.entryconfigure(3, label=self.app.tr("button.update_template", "更新该模板"))
+        self._menu.entryconfigure(4, label=self.app.tr("button.reload_template", "重新加载模板"))
+
     def set_layout(self, rows: int, smart_layout: bool, layout_algorithm: Optional[str] = None) -> None:
         self.rows = max(1, rows)
         self.smart_layout = smart_layout
@@ -354,7 +487,7 @@ class GroupWindow:
                 added += 1
             except Exception as exc:
                 if show_errors:
-                    messagebox.showwarning("读取失败", f"无法读取图片:\n{p}\n\n{exc}")
+                    messagebox.showwarning(self.app.tr("msg.read_failed", "读取失败"), self.app.tr("msg.cannot_read_image", "无法读取图片:\n{path}\n\n{error}", path=p, error=exc))
         if added:
             self.app.mark_dirty()
             self.render(force=True)
@@ -414,6 +547,9 @@ class GroupWindow:
 
     def _flush_resize_render(self) -> None:
         self._resize_after_id = None
+        size_now = (self.canvas.winfo_width(), self.canvas.winfo_height())
+        if size_now != self._last_layout_size:
+            self._photo_cache.clear()
         self.render(force=True)
 
     def _close(self) -> None:
@@ -757,9 +893,16 @@ class GroupWindow:
         resized = self._resize_frame(src, w, h)
         tk_img = ImageTk.PhotoImage(resized)
         self._photo_cache[key] = tk_img
-        while len(self._photo_cache) > CACHE_LIMIT:
-            self._photo_cache.popitem(last=False)
+        self._trim_photo_cache()
         return tk_img
+
+    def _trim_photo_cache(self) -> None:
+        limit = self.app.current_cache_limit()
+        while len(self._photo_cache) > limit:
+            self._photo_cache.popitem(last=False)
+
+    def gif_item_count(self) -> int:
+        return sum(1 for item in self.items if item.is_gif and item.gif_frames)
 
     def _index_from_xy(self, x: int, y: int) -> Optional[int]:
         if not self.items:
@@ -884,7 +1027,7 @@ class GroupWindow:
             if idx not in self._selected_indexes:
                 self._selected_indexes = {idx}
         remove_count = len(self._selected_indexes) if self._selected_indexes else (1 if idx is not None else 0)
-        remove_label = "从窗口组移除所选图片" if remove_count > 1 else "从窗口组移除图片"
+        remove_label = self.app.tr("menu.remove_selected_images", "从窗口组移除所选图片") if remove_count > 1 else self.app.tr("menu.remove_image", "从窗口组移除图片")
         self._menu.entryconfigure(0, label=remove_label, state=("normal" if remove_count > 0 else "disabled"))
         has_template = self.template_path is not None and self.template_path.exists()
         self._menu.entryconfigure(3, state=("normal" if has_template else "disabled"))
@@ -923,7 +1066,7 @@ class GroupWindow:
                 total_w // 2,
                 total_h // 2,
                 fill="#aaaaaa",
-                text="该窗口组还没有图片\n可直接拖拽到此窗口",
+                text=self.app.tr("group.empty_hint", "该窗口组还没有图片\n可直接拖拽到此窗口"),
                 font=("Microsoft YaHei UI", 14),
                 justify=tk.CENTER,
             )
@@ -1119,6 +1262,11 @@ class PicReadApp:
         self._last_save_ts = 0.0
         self._suspend_dirty = False
         self._ui_state = self._load_ui_state()
+        self.language_code = str(self._ui_state.get("language", "zh_CN"))
+        if self.language_code not in LANGUAGE_OPTIONS:
+            self.language_code = "zh_CN"
+        self._i18n = self._load_i18n(self.language_code)
+        self.root.title(self.tr("app.title", "PicRead - 多窗口组平铺看图"))
         self._last_tick_updated = 0
         self._last_status_refresh = 0.0
         self.drag_drop_enabled = False
@@ -1176,19 +1324,22 @@ class PicReadApp:
             except Exception:
                 pass
 
+    def _default_group_name(self) -> str:
+        return self.tr("group.default_name", "窗口组")
+
     def _set_initial_window_geometry(self) -> None:
         sw = max(1024, self.root.winfo_screenwidth())
         sh = max(720, self.root.winfo_screenheight())
 
         # 给任务栏/缩放留安全边距，避免首屏 UI 被裁切。
-        width = min(1680, max(1180, int(sw * 0.94)))
-        height = min(1060, max(760, int(sh * 0.88)))
+        width = min(1960, max(1520, int(sw * 0.975)))
+        height = min(1120, max(820, int(sh * 0.90)))
         x = max(0, (sw - width) // 2)
         y = max(0, (sh - height) // 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
-        min_w = min(width, max(1120, int(sw * 0.8)))
-        min_h = min(height, max(700, int(sh * 0.72)))
+        min_w = min(width, max(1460, int(sw * 0.90)))
+        min_h = min(height, max(760, int(sh * 0.76)))
         self.root.minsize(min_w, min_h)
 
     def apply_safe_layout(self) -> None:
@@ -1236,11 +1387,41 @@ class PicReadApp:
             pass
         return {}
 
+    def _load_i18n(self, code: str) -> dict[str, str]:
+        lang_file = I18N_DIR / f"{code}.json"
+        try:
+            data = json.loads(lang_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
+        return {}
+
+    def tr(self, key: str, default: Optional[str] = None, **kwargs) -> str:
+        text = self._i18n.get(key, default if default is not None else key)
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except Exception:
+                return text
+        return text
+
+    def perf_mode_label(self, key: str) -> str:
+        return self.tr(f"perf_mode.{key}", key)
+
+    def load_profile_label(self, key: str) -> str:
+        return self.tr(f"load_profile.{key}", key)
+
+    def language_label(self, code: str) -> str:
+        return LANGUAGE_OPTIONS.get(code, code)
+
     def _save_ui_state(self) -> None:
         geom_items = list(self._template_geometry_map.items())[:300]
         data = {
             "template_view_mode": self.template_view_var.get() if hasattr(self, "template_view_var") else "list",
             "perf_mode": self.perf_mode_var.get() if hasattr(self, "perf_mode_var") else "平衡",
+            "load_profile": self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载",
+            "language": self.language_code,
             "template_geometry_map": dict(geom_items),
         }
         try:
@@ -1253,12 +1434,12 @@ class PicReadApp:
         root_frame = ttk.Frame(self.root, padding=12)
         root_frame.pack(fill=tk.BOTH, expand=True)
 
-        head = ttk.Label(
+        self.head_label = ttk.Label(
             root_frame,
-            text="PicRead | 多窗口组平铺看图",
+            text=self.tr("app.header", "PicRead | 多窗口组平铺看图"),
             font=("Microsoft YaHei UI", 14, "bold"),
         )
-        head.pack(anchor="w")
+        self.head_label.pack(anchor="w")
         ttk.Separator(root_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(8, 10))
 
         self.notebook = ttk.Notebook(root_frame)
@@ -1267,50 +1448,103 @@ class PicReadApp:
         groups_tab = ttk.Frame(self.notebook, padding=10)
         templates_tab = ttk.Frame(self.notebook, padding=10)
         history_tab = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(groups_tab, text="窗口组")
-        self.notebook.add(templates_tab, text="模板库")
-        self.notebook.add(history_tab, text="历史记录")
+        self.notebook.add(groups_tab, text=self.tr("tab.groups", "窗口组"))
+        self.notebook.add(templates_tab, text=self.tr("tab.templates", "模板库"))
+        self.notebook.add(history_tab, text=self.tr("tab.history", "历史记录"))
 
         control = ttk.Frame(groups_tab)
         control.pack(fill=tk.X)
 
-        ttk.Label(control, text="窗口组名:").grid(row=0, column=0, sticky="w")
-        self.group_name_var = tk.StringVar(value="窗口组")
-        ttk.Entry(control, textvariable=self.group_name_var, width=18).grid(row=0, column=1, padx=6)
+        group_row1 = ttk.Frame(control)
+        group_row1.pack(fill=tk.X, anchor="w")
+        group_row2 = ttk.Frame(control)
+        group_row2.pack(fill=tk.X, anchor="w", pady=(12, 0))
 
-        ttk.Label(control, text="行数:").grid(row=0, column=2, sticky="e")
+        self.lbl_group_name = ttk.Label(group_row1, text=self.tr("control.group_name", "窗口组名:"))
+        self.lbl_group_name.pack(side=tk.LEFT)
+        self.group_name_var = tk.StringVar(value=self._default_group_name())
+        self.group_name_entry = ttk.Entry(group_row1, textvariable=self.group_name_var, width=15)
+        self.group_name_entry.pack(side=tk.LEFT, padx=(6, 22))
+
+        self.lbl_rows = ttk.Label(group_row1, text=self.tr("control.rows", "行数:"))
+        self.lbl_rows.pack(side=tk.LEFT)
         self.rows_var = tk.IntVar(value=2)
-        ttk.Spinbox(control, from_=1, to=12, textvariable=self.rows_var, width=6).grid(
-            row=0, column=3, padx=6
-        )
+        self.rows_spin = ttk.Spinbox(group_row1, from_=1, to=12, textvariable=self.rows_var, width=5)
+        self.rows_spin.pack(side=tk.LEFT, padx=(6, 22))
 
         self.smart_layout_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(control, text="智能排版", variable=self.smart_layout_var).grid(row=0, column=4, padx=6)
-        ttk.Label(control, text="算法:").grid(row=0, column=5, sticky="e", padx=(8, 4))
+        self._control_label_font = ("Microsoft YaHei UI", 11)
+        self.smart_layout_check = BoxToggle(
+            group_row1,
+            self.tr("control.smart_layout", "智能排版"),
+            self.smart_layout_var,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self.smart_layout_check.pack(side=tk.LEFT, padx=(0, 22))
+        self.lbl_algorithm = ttk.Label(group_row1, text=self.tr("control.algorithm", "算法:"))
+        self.lbl_algorithm.pack(side=tk.LEFT)
         self.layout_algo_var = tk.StringVar(value="legacy")
         self.layout_algo_combo = ttk.Combobox(
-            control,
+            group_row1,
             textvariable=self.layout_algo_var,
             values=[f"{LAYOUT_ALGORITHMS[key]} ({key})" for key in LAYOUT_ALGORITHMS],
             state="readonly",
-            width=14,
+            width=17,
         )
-        self.layout_algo_combo.grid(row=0, column=6, sticky="w")
+        self.layout_algo_combo.pack(side=tk.LEFT, padx=(6, 0))
         self.layout_algo_combo.bind("<<ComboboxSelected>>", lambda _e: self._sync_layout_algo_value())
         self._sync_layout_algo_value("legacy")
 
-        ttk.Button(control, text="创建窗口组", command=self.create_group).grid(row=0, column=7, padx=(10, 0))
-        ttk.Label(control, text="性能模式:").grid(row=0, column=8, sticky="e", padx=(16, 4))
+        self.lbl_perf_mode = ttk.Label(group_row2, text=self.tr("control.perf_mode", "性能模式:"))
+        self.lbl_perf_mode.pack(side=tk.LEFT)
         default_mode = str(self._ui_state.get("perf_mode", "平衡"))
         if default_mode not in PERF_MODES:
             default_mode = "平衡"
         self.perf_mode_var = tk.StringVar(value=default_mode)
+        self.perf_mode_display_var = tk.StringVar()
         self.perf_mode_combo = ttk.Combobox(
-            control, textvariable=self.perf_mode_var, values=list(PERF_MODES.keys()), state="readonly", width=8
+            group_row2, textvariable=self.perf_mode_display_var, values=[], state="readonly", width=12
         )
-        self.perf_mode_combo.grid(row=0, column=9, sticky="w")
+        self.perf_mode_combo.pack(side=tk.LEFT, padx=(6, 20))
         self.perf_mode_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_perf_mode_change())
-        ttk.Button(control, text="调参面板", command=self.open_tuning_panel).grid(row=0, column=10, padx=(8, 0))
+        self.lbl_load = ttk.Label(group_row2, text=self.tr("control.load_profile", "负载:"))
+        self.lbl_load.pack(side=tk.LEFT)
+        default_load = str(self._ui_state.get("load_profile", "低负载"))
+        if default_load not in LOAD_PROFILES:
+            default_load = "低负载"
+        self.load_profile_var = tk.StringVar(value=default_load)
+        self.load_profile_display_var = tk.StringVar()
+        self.load_profile_combo = ttk.Combobox(
+            group_row2, textvariable=self.load_profile_display_var, values=[], state="readonly", width=12
+        )
+        self.load_profile_combo.pack(side=tk.LEFT, padx=(6, 20))
+        self.load_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_load_profile_change())
+        self.lbl_language = ttk.Label(group_row2, text=self.tr("control.language", "语言:"))
+        self.lbl_language.pack(side=tk.LEFT)
+        self.language_display_var = tk.StringVar(value=self.language_label(self.language_code))
+        self.language_combo = ttk.Combobox(
+            group_row2,
+            textvariable=self.language_display_var,
+            values=[self.language_label(code) for code in LANGUAGE_OPTIONS],
+            state="readonly",
+            width=11,
+        )
+        self.language_combo.pack(side=tk.LEFT, padx=(6, 20))
+        self.language_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_language_change())
+        group_actions = ttk.Frame(group_row2)
+        group_actions.pack(side=tk.LEFT, padx=(8, 0))
+        self.tuning_btn = ttk.Button(
+            group_actions, text=self.tr("control.tuning_panel", "调参面板"), command=self.open_tuning_panel
+        )
+        self.tuning_btn.pack(side=tk.LEFT)
+        self.create_group_btn = ttk.Button(
+            group_actions, text=self.tr("control.create_group", "创建窗口组"), command=self.create_group, width=12
+        )
+        self.create_group_btn.pack(side=tk.LEFT, padx=(10, 0))
 
         list_frame = ttk.Frame(groups_tab)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=10)
@@ -1325,54 +1559,98 @@ class PicReadApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.group_list.configure(yscrollcommand=scrollbar.set)
         self.group_list_menu = tk.Menu(self.root, tearoff=0)
-        self.group_list_menu.add_command(label="置顶/取消置顶", command=self._toggle_pin_selected_group)
+        self.group_list_menu.add_command(label=self.tr("menu.pin_toggle", "置顶/取消置顶"), command=self._toggle_pin_selected_group)
 
         btns1 = ttk.Frame(groups_tab)
         btns1.pack(fill=tk.X)
-        ttk.Button(btns1, text="应用布局", command=self.update_layout).pack(side=tk.LEFT)
-        ttk.Button(btns1, text="合并到当前组", command=self.merge_groups).pack(side=tk.LEFT, padx=8)
-        ttk.Button(btns1, text="关闭窗口组", command=self.close_group).pack(side=tk.RIGHT)
+        self.apply_layout_btn = ttk.Button(btns1, text=self.tr("button.apply_layout", "应用布局"), command=self.update_layout)
+        self.apply_layout_btn.pack(side=tk.LEFT)
+        self.merge_btn = ttk.Button(btns1, text=self.tr("button.merge_to_current", "合并到当前组"), command=self.merge_groups)
+        self.merge_btn.pack(side=tk.LEFT, padx=8)
+        self.close_group_btn = ttk.Button(btns1, text=self.tr("button.close_group", "关闭窗口组"), command=self.close_group)
+        self.close_group_btn.pack(side=tk.RIGHT)
 
         btns2 = ttk.Frame(groups_tab)
         btns2.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(btns2, text="启动安全布局", command=self.apply_safe_layout).pack(side=tk.LEFT)
-        ttk.Button(btns2, text="保存为模板", command=self.save_group_template).pack(side=tk.LEFT)
-        ttk.Button(btns2, text="保存会话", command=self.save_session_snapshot).pack(side=tk.LEFT, padx=8)
+        self.safe_layout_btn = ttk.Button(btns2, text=self.tr("button.safe_layout", "启动安全布局"), command=self.apply_safe_layout)
+        self.safe_layout_btn.pack(side=tk.LEFT)
+        self.save_template_btn = ttk.Button(btns2, text=self.tr("button.save_template", "保存为模板"), command=self.save_group_template)
+        self.save_template_btn.pack(side=tk.LEFT)
+        self.save_session_btn = ttk.Button(btns2, text=self.tr("button.save_session", "保存会话"), command=self.save_session_snapshot)
+        self.save_session_btn.pack(side=tk.LEFT, padx=8)
 
         tpl_top = ttk.Frame(templates_tab)
         tpl_top.pack(fill=tk.X)
-        ttk.Button(tpl_top, text="刷新模板库", command=self.refresh_template_library).pack(side=tk.LEFT)
-        ttk.Button(tpl_top, text="打开模板", command=self.load_group_template).pack(side=tk.LEFT, padx=8)
-        ttk.Button(tpl_top, text="重命名模板", command=self.rename_selected_template).pack(side=tk.LEFT)
-        ttk.Button(tpl_top, text="编辑标签", command=self.edit_selected_template_tags).pack(side=tk.LEFT, padx=8)
-        ttk.Button(tpl_top, text="删除模板", command=self.delete_selected_template).pack(side=tk.LEFT)
-        ttk.Button(tpl_top, text="更新该模板", command=self.update_linked_template).pack(side=tk.LEFT, padx=8)
-        ttk.Button(tpl_top, text="重新加载模板", command=self.reload_linked_template).pack(side=tk.LEFT)
+
+        tpl_actions = ttk.Frame(tpl_top)
+        tpl_actions.pack(anchor="w")
+        tpl_filters = ttk.Frame(tpl_top)
+        tpl_filters.pack(fill=tk.X, anchor="w", pady=(12, 0))
+
+        self.tpl_refresh_btn = ttk.Button(tpl_actions, text=self.tr("button.refresh_templates", "刷新模板库"), command=self.refresh_template_library)
+        self.tpl_refresh_btn.pack(side=tk.LEFT)
+        self.tpl_open_btn = ttk.Button(tpl_actions, text=self.tr("button.open_template", "打开模板"), command=self.load_group_template)
+        self.tpl_open_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.tpl_update_btn = ttk.Button(tpl_actions, text=self.tr("button.update_template", "更新该模板"), command=self.update_linked_template)
+        self.tpl_update_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.tpl_reload_btn = ttk.Button(tpl_actions, text=self.tr("button.reload_template", "重新加载模板"), command=self.reload_linked_template)
+        self.tpl_reload_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.tpl_rename_btn = ttk.Button(tpl_actions, text=self.tr("button.rename_template", "重命名模板"), command=self.rename_selected_template)
+        self.tpl_rename_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.tpl_tags_btn = ttk.Button(tpl_actions, text=self.tr("button.edit_tags", "编辑标签"), command=self.edit_selected_template_tags)
+        self.tpl_tags_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.tpl_delete_btn = ttk.Button(tpl_actions, text=self.tr("button.delete_template", "删除模板"), command=self.delete_selected_template)
+        self.tpl_delete_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.template_view_var = tk.StringVar(value=str(self._ui_state.get("template_view_mode", "list")))
-        ttk.Radiobutton(
-            tpl_top, text="列表", variable=self.template_view_var, value="list", command=self._switch_template_view
-        ).pack(side=tk.RIGHT)
-        ttk.Radiobutton(
-            tpl_top, text="图标", variable=self.template_view_var, value="icon", command=self._switch_template_view
-        ).pack(side=tk.RIGHT, padx=8)
-        ttk.Label(tpl_top, text="标签:").pack(side=tk.RIGHT)
-        self.template_tag_var = tk.StringVar(value="全部")
-        self.template_tag_combo = ttk.Combobox(
-            tpl_top, textvariable=self.template_tag_var, values=["全部"], state="readonly", width=12
-        )
-        self.template_tag_combo.pack(side=tk.RIGHT, padx=(4, 8))
-        self.template_tag_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_template_library())
-        ttk.Label(tpl_top, text="搜索:").pack(side=tk.RIGHT)
+        self.tpl_search_label = ttk.Label(tpl_filters, text=self.tr("template.search", "搜索:"))
+        self.tpl_search_label.pack(side=tk.LEFT)
         self.template_search_var = tk.StringVar(value="")
-        search_entry = ttk.Entry(tpl_top, textvariable=self.template_search_var, width=18)
-        search_entry.pack(side=tk.RIGHT, padx=(4, 12))
+        self.template_search_entry = ttk.Entry(tpl_filters, textvariable=self.template_search_var, width=26)
+        self.template_search_entry.pack(side=tk.LEFT, padx=(6, 18))
         self.template_search_var.trace_add("write", lambda *_: self.refresh_template_library())
+        self.tpl_tag_label = ttk.Label(tpl_filters, text=self.tr("template.tag", "标签:"))
+        self.tpl_tag_label.pack(side=tk.LEFT)
+        self.template_tag_var = tk.StringVar(value=self.tr("template.all", "全部"))
+        self.template_tag_combo = ttk.Combobox(
+            tpl_filters, textvariable=self.template_tag_var, values=[self.tr("template.all", "全部")], state="readonly", width=12
+        )
+        self.template_tag_combo.pack(side=tk.LEFT, padx=(6, 18))
+        self.template_tag_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_template_library())
+        tpl_view_wrap = ttk.Frame(tpl_filters)
+        tpl_view_wrap.pack(side=tk.LEFT, padx=(4, 0))
+        self.tpl_view_icon_radio = DotRadio(
+            tpl_view_wrap,
+            self.tr("template.view_icon", "图标"),
+            self.template_view_var,
+            "icon",
+            command=self._switch_template_view,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self.tpl_view_icon_radio.pack(side=tk.LEFT)
+        self.tpl_view_list_radio = DotRadio(
+            tpl_view_wrap,
+            self.tr("template.view_list", "列表"),
+            self.template_view_var,
+            "list",
+            command=self._switch_template_view,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self.tpl_view_list_radio.pack(side=tk.LEFT, padx=(10, 0))
 
         self.template_entries: list[dict] = []
         self.template_selected_idx: Optional[int] = None
         self.template_thumbs: list[ImageTk.PhotoImage] = []
         self.template_icon_cells: list[tuple[int, int, int, int]] = []
-        self.template_context_var = tk.StringVar(value="当前目标组：未选择")
+        self._template_render_after_id: Optional[str] = None
+        self.template_context_var = tk.StringVar(value=self.tr("template.context_none", "当前目标组：未选择"))
         ttk.Label(templates_tab, textvariable=self.template_context_var).pack(anchor="w", pady=(8, 2))
 
         self.tpl_stack = ttk.Frame(templates_tab)
@@ -1393,7 +1671,7 @@ class PicReadApp:
         self.template_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.template_canvas.bind("<Button-1>", self._on_template_icon_click)
         self.template_canvas.bind("<Double-Button-1>", lambda _e: self.load_group_template())
-        self.template_canvas.bind("<Configure>", lambda _e: self._render_template_icons())
+        self.template_canvas.bind("<Configure>", lambda _e: self._schedule_template_icon_render())
         self._bind_vertical_mousewheel(self.template_canvas, self.template_canvas)
         self.tpl_icon_scroll = ttk.Scrollbar(self.tpl_icon_frame, orient=tk.VERTICAL, command=self.template_canvas.yview)
         self.tpl_icon_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1404,17 +1682,20 @@ class PicReadApp:
         self._build_history_tab(history_tab)
         self.refresh_history_library()
 
-        self.status_var = tk.StringVar(value="就绪")
+        self.status_var = tk.StringVar(value=self.tr("status.ready", "就绪"))
         status = ttk.Label(root_frame, textvariable=self.status_var, anchor="w", justify=tk.LEFT)
         status.pack(fill=tk.X, pady=(8, 0))
         root_frame.bind(
             "<Configure>",
             lambda e: status.configure(wraplength=max(280, int(e.width) - 24)),
         )
+        self._refresh_perf_mode_options()
+        self._refresh_load_profile_options()
         self._apply_dark_widget_styles()
+        self._refresh_window_texts()
 
     def _setup_style(self) -> None:
-        self.root.option_add("*Font", "{Microsoft YaHei UI} 10")
+        self.root.option_add("*Font", "{Microsoft YaHei UI} 11")
         style = ttk.Style(self.root)
         for candidate in ("clam", "vista", "xpnative"):
             if candidate in style.theme_names():
@@ -1427,19 +1708,36 @@ class PicReadApp:
         accent = "#007acc"
         muted = "#9da5b4"
         border = "#3c3c3c"
+        self._theme_bg = bg
+        self._theme_panel = panel
+        self._theme_fg = fg
+        self._theme_accent = accent
+        self._theme_muted = muted
+        self._theme_border = border
 
         self.root.configure(bg=bg)
         style.configure(".", background=bg, foreground=fg)
         style.configure("TFrame", background=bg)
-        style.configure("TLabel", background=bg, foreground=fg, padding=(1, 1))
-        style.configure("TButton", background=panel, foreground=fg, bordercolor=border, padding=(10, 6))
+        style.configure("TLabel", background=bg, foreground=fg, padding=(2, 2))
+        style.configure("TButton", background=panel, foreground=fg, bordercolor="#747474", padding=(16, 9))
         style.map(
             "TButton",
-            background=[("active", "#2a2d2e"), ("pressed", "#31363b")],
+            background=[("active", "#2f3335"), ("pressed", "#3a4046")],
             foreground=[("disabled", muted)],
         )
-        style.configure("TEntry", fieldbackground=panel, foreground=fg, bordercolor=border)
-        style.configure("TCombobox", fieldbackground=panel, foreground=fg, background=panel)
+        style.configure("TEntry", fieldbackground=panel, foreground=fg, bordercolor="#747474", padding=(6, 5))
+        style.configure(
+            "TCombobox",
+            fieldbackground=panel,
+            foreground=fg,
+            background=panel,
+            bordercolor="#747474",
+            darkcolor=panel,
+            lightcolor=panel,
+            arrowcolor="#ffffff",
+            arrowsize=18,
+            padding=(6, 5),
+        )
         style.map(
             "TCombobox",
             fieldbackground=[("readonly", panel), ("disabled", "#2a2a2a")],
@@ -1447,16 +1745,40 @@ class PicReadApp:
             selectbackground=[("readonly", panel)],
             selectforeground=[("readonly", fg)],
         )
-        style.configure("TSpinbox", fieldbackground=panel, foreground=fg, arrowcolor=fg)
+        style.configure(
+            "TSpinbox",
+            fieldbackground=panel,
+            foreground=fg,
+            bordercolor="#747474",
+            darkcolor=panel,
+            lightcolor=panel,
+            arrowcolor="#ffffff",
+            arrowsize=18,
+            padding=(4, 4),
+        )
         style.map(
             "TSpinbox",
             fieldbackground=[("readonly", panel), ("disabled", "#2a2a2a")],
             foreground=[("readonly", fg), ("disabled", "#7f848e")],
         )
-        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure(
+            "TCheckbutton",
+            background=bg,
+            foreground=fg,
+            indicatorcolor=panel,
+            indicatorbackground=panel,
+            indicatormargin=4,
+            padding=(4, 3),
+        )
+        style.map(
+            "TCheckbutton",
+            indicatorcolor=[("selected", "#dcdcdc"), ("!selected", panel)],
+            indicatorbackground=[("selected", panel), ("!selected", panel)],
+            foreground=[("disabled", muted)],
+        )
         style.configure("TRadiobutton", background=bg, foreground=fg)
         style.configure("TNotebook", background=bg, borderwidth=0)
-        style.configure("TNotebook.Tab", background=panel, foreground=fg, padding=(10, 6))
+        style.configure("TNotebook.Tab", background=panel, foreground=fg, padding=(14, 8))
         style.map("TNotebook.Tab", background=[("selected", "#333333")], foreground=[("selected", "#ffffff")])
         style.configure("TSeparator", background=border)
         style.configure("Vertical.TScrollbar", background=panel, troughcolor=bg, bordercolor=border)
@@ -1485,7 +1807,9 @@ class PicReadApp:
 
     def _layout_algo_label(self, key: str) -> str:
         safe_key = key if key in LAYOUT_ALGORITHMS else "legacy"
-        return f"{LAYOUT_ALGORITHMS[safe_key]} ({safe_key})"
+        lang = getattr(self, "language_code", "zh_CN")
+        suffix = safe_key if lang == "zh_CN" else safe_key.upper()
+        return f"{self.tr(f'layout.{safe_key}', LAYOUT_ALGORITHMS[safe_key])} ({suffix})"
 
     def _layout_algo_key_from_var(self) -> str:
         raw = self.layout_algo_var.get().strip() if hasattr(self, "layout_algo_var") else "legacy"
@@ -1497,6 +1821,93 @@ class PicReadApp:
         safe_key = key or self._layout_algo_key_from_var()
         if hasattr(self, "layout_algo_var"):
             self.layout_algo_var.set(self._layout_algo_label(safe_key))
+
+    def _refresh_perf_mode_options(self) -> None:
+        values = [self.perf_mode_label(key) for key in PERF_MODES]
+        self.perf_mode_combo.configure(values=values)
+        current = self.perf_mode_var.get() if hasattr(self, "perf_mode_var") else "平衡"
+        self.perf_mode_display_var.set(self.perf_mode_label(current))
+
+    def _refresh_load_profile_options(self) -> None:
+        values = [self.load_profile_label(key) for key in LOAD_PROFILES]
+        self.load_profile_combo.configure(values=values)
+        current = self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
+        self.load_profile_display_var.set(self.load_profile_label(current))
+
+    def _perf_mode_key_from_display(self) -> str:
+        raw = self.perf_mode_display_var.get().strip()
+        for key in PERF_MODES:
+            if raw == self.perf_mode_label(key):
+                return key
+        return self.perf_mode_var.get() if hasattr(self, "perf_mode_var") else "平衡"
+
+    def _load_profile_key_from_display(self) -> str:
+        raw = self.load_profile_display_var.get().strip()
+        for key in LOAD_PROFILES:
+            if raw == self.load_profile_label(key):
+                return key
+        return self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
+
+    def _on_language_change(self) -> None:
+        selected = self.language_display_var.get().strip()
+        for code in LANGUAGE_OPTIONS:
+            if selected == self.language_label(code):
+                self.language_code = code
+                self._i18n = self._load_i18n(code)
+                self.mark_dirty()
+                self._refresh_window_texts()
+                self._update_status(self._last_tick_updated, time.time())
+                return
+
+    def _refresh_window_texts(self) -> None:
+        old_default_names = {"窗口组", "Window Group"}
+        if self.group_name_var.get().strip() in old_default_names:
+            self.group_name_var.set(self._default_group_name())
+        self.root.title(self.tr("app.title", "PicRead - 多窗口组平铺看图"))
+        self.head_label.configure(text=self.tr("app.header", "PicRead | 多窗口组平铺看图"))
+        self.notebook.tab(0, text=self.tr("tab.groups", "窗口组"))
+        self.notebook.tab(1, text=self.tr("tab.templates", "模板库"))
+        self.notebook.tab(2, text=self.tr("tab.history", "历史记录"))
+        self.lbl_group_name.configure(text=self.tr("control.group_name", "窗口组名:"))
+        self.lbl_rows.configure(text=self.tr("control.rows", "行数:"))
+        self.smart_layout_check.set_text(self.tr("control.smart_layout", "智能排版"))
+        self.lbl_algorithm.configure(text=self.tr("control.algorithm", "算法:"))
+        self.create_group_btn.configure(text=self.tr("control.create_group", "创建窗口组"))
+        self.lbl_perf_mode.configure(text=self.tr("control.perf_mode", "性能模式:"))
+        self.lbl_load.configure(text=self.tr("control.load_profile", "负载:"))
+        self.lbl_language.configure(text=self.tr("control.language", "语言:"))
+        self.tuning_btn.configure(text=self.tr("control.tuning_panel", "调参面板"))
+        self.group_list_menu.entryconfigure(0, label=self.tr("menu.pin_toggle", "置顶/取消置顶"))
+        self.apply_layout_btn.configure(text=self.tr("button.apply_layout", "应用布局"))
+        self.merge_btn.configure(text=self.tr("button.merge_to_current", "合并到当前组"))
+        self.close_group_btn.configure(text=self.tr("button.close_group", "关闭窗口组"))
+        self.safe_layout_btn.configure(text=self.tr("button.safe_layout", "启动安全布局"))
+        self.save_template_btn.configure(text=self.tr("button.save_template", "保存为模板"))
+        self.save_session_btn.configure(text=self.tr("button.save_session", "保存会话"))
+        self.tpl_refresh_btn.configure(text=self.tr("button.refresh_templates", "刷新模板库"))
+        self.tpl_open_btn.configure(text=self.tr("button.open_template", "打开模板"))
+        self.tpl_rename_btn.configure(text=self.tr("button.rename_template", "重命名模板"))
+        self.tpl_tags_btn.configure(text=self.tr("button.edit_tags", "编辑标签"))
+        self.tpl_delete_btn.configure(text=self.tr("button.delete_template", "删除模板"))
+        self.tpl_update_btn.configure(text=self.tr("button.update_template", "更新该模板"))
+        self.tpl_reload_btn.configure(text=self.tr("button.reload_template", "重新加载模板"))
+        self.tpl_view_list_radio.set_text(self.tr("template.view_list", "列表"))
+        self.tpl_view_icon_radio.set_text(self.tr("template.view_icon", "图标"))
+        self.tpl_tag_label.configure(text=self.tr("template.tag", "标签:"))
+        self.tpl_search_label.configure(text=self.tr("template.search", "搜索:"))
+        if hasattr(self, "history_refresh_btn"):
+            self.history_refresh_btn.configure(text=self.tr("button.refresh_history", "刷新历史"))
+            self.history_open_btn.configure(text=self.tr("button.open_selected_history", "打开所选历史"))
+        self.language_combo.configure(values=[self.language_label(code) for code in LANGUAGE_OPTIONS])
+        self.language_display_var.set(self.language_label(self.language_code))
+        self._refresh_perf_mode_options()
+        self._refresh_load_profile_options()
+        self._sync_layout_algo_value(self._layout_algo_key_from_var())
+        self._update_template_context_label()
+        self.refresh_template_library()
+        self.refresh_history_library()
+        for g in self.groups.values():
+            g.refresh_localized_texts()
 
     def mark_dirty(self) -> None:
         if self._suspend_dirty:
@@ -1621,7 +2032,7 @@ class PicReadApp:
     def _on_drop_to_main(self, files) -> None:
         paths = self._collect_supported_paths(files)
         if not paths:
-            messagebox.showwarning("提示", "拖入的文件里没有受支持的图片格式。")
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.no_supported_images_dropped", "拖入的文件里没有受支持的图片格式。"))
             return
 
         group = self._selected_group()
@@ -1629,7 +2040,7 @@ class PicReadApp:
             group = next(iter(self.groups.values()))
 
         if group is None:
-            messagebox.showinfo("提示", "请先创建并选中一个窗口组，再拖入图片。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_before_drop", "请先创建并选中一个窗口组，再拖入图片。"))
             return
 
         self.add_paths_to_group(group, paths)
@@ -1637,7 +2048,7 @@ class PicReadApp:
     def _on_drop_to_group(self, group: GroupWindow, files) -> None:
         paths = self._collect_supported_paths(files)
         if not paths:
-            messagebox.showwarning("提示", "拖入的文件里没有受支持的图片格式。")
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.no_supported_images_dropped", "拖入的文件里没有受支持的图片格式。"))
             return
         self.add_paths_to_group(group, paths)
 
@@ -1679,7 +2090,7 @@ class PicReadApp:
 
     def _template_display_name(self, data: dict, fallback_stem: str) -> str:
         raw = str(data.get("template_name", data.get("name", fallback_stem))).strip()
-        if raw in {"", "窗口组", "模板组"}:
+        if raw in {"", "窗口组", "模板组", "Window Group", "Template Group"}:
             return fallback_stem
         return raw
 
@@ -1693,20 +2104,58 @@ class PicReadApp:
         self.tpl_icon_frame.pack_forget()
         if mode == "icon":
             self.tpl_icon_frame.pack(fill=tk.BOTH, expand=True)
-            self._render_template_icons()
+            self._schedule_template_icon_render()
         else:
             self.tpl_list_frame.pack(fill=tk.BOTH, expand=True)
 
+    def _schedule_template_icon_render(self) -> None:
+        if not hasattr(self, "template_canvas"):
+            return
+        if self._template_render_after_id:
+            try:
+                self.root.after_cancel(self._template_render_after_id)
+            except Exception:
+                pass
+        self._template_render_after_id = self.root.after(80, self._flush_template_icon_render)
+
+    def _flush_template_icon_render(self) -> None:
+        self._template_render_after_id = None
+        self._render_template_icons()
+
+    def current_load_profile(self) -> dict:
+        name = self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
+        return LOAD_PROFILES.get(name, LOAD_PROFILES["低负载"])
+
+    def current_cache_limit(self) -> int:
+        return int(self.current_load_profile()["cache_limit"])
+
     def current_profile(self) -> dict:
         mode = self.perf_mode_var.get() if hasattr(self, "perf_mode_var") else "平衡"
-        return PERF_MODES.get(mode, PERF_MODES["平衡"])
+        base = deepcopy(PERF_MODES.get(mode, PERF_MODES["平衡"]))
+        load_profile = self.current_load_profile()
+        base_budget = int(base["frame_budget"])
+        effective_budget = max(8, int(round(base_budget * float(load_profile["budget_scale"]))))
+        base["base_frame_budget"] = base_budget
+        base["frame_budget"] = effective_budget
+        base["cache_limit"] = int(load_profile["cache_limit"])
+        base["load_name"] = self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
+        base["memory_hint_gb"] = int(load_profile["memory_hint_gb"])
+        return base
 
     def _on_perf_mode_change(self) -> None:
+        self.perf_mode_var.set(self._perf_mode_key_from_display())
         self.mark_dirty()
         for g in self.groups.values():
             g._photo_cache.clear()
             g.render(force=True)
         self._sync_tuning_panel_from_mode()
+
+    def _on_load_profile_change(self) -> None:
+        self.load_profile_var.set(self._load_profile_key_from_display())
+        self.mark_dirty()
+        for g in self.groups.values():
+            g._trim_photo_cache()
+        self._update_status(self._last_tick_updated, time.time())
 
     def _sync_tuning_panel_from_mode(self) -> None:
         if not hasattr(self, "_tune_win") or self._tune_win is None or not self._tune_win.winfo_exists():
@@ -1729,16 +2178,16 @@ class PicReadApp:
             return
 
         win = tk.Toplevel(self.root)
-        win.title("画质/性能调参")
-        self._center_window(win, 520, 420)
-        win.minsize(480, 360)
+        win.title(self.tr("tuning.title", "画质/性能调参"))
+        self._center_window(win, 620, 470)
+        win.minsize(560, 420)
         win.transient(self.root)
         self._tune_win = win
 
         frame = ttk.Frame(win, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="当前模式参数（修改后立即生效）").pack(anchor="w")
-        ttk.Label(frame, text="说明：复选框勾选=开启，取消=关闭").pack(anchor="w", pady=(2, 8))
+        ttk.Label(frame, text=self.tr("tuning.current_mode_hint", "当前模式参数（修改后立即生效）")).pack(anchor="w")
+        ttk.Label(frame, text=self.tr("tuning.checkbox_hint", "说明：复选框勾选=开启，取消=关闭")).pack(anchor="w", pady=(2, 8))
 
         self._tune_tick_var = tk.IntVar()
         self._tune_budget_var = tk.IntVar()
@@ -1751,30 +2200,60 @@ class PicReadApp:
         grid = ttk.Frame(frame)
         grid.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        ttk.Label(grid, text="刷新间隔 ms").grid(row=0, column=0, sticky="w")
+        ttk.Label(grid, text=self.tr("tuning.tick_ms", "刷新间隔 ms")).grid(row=0, column=0, sticky="w")
         ttk.Scale(grid, from_=12, to=45, variable=self._tune_tick_var, orient=tk.HORIZONTAL).grid(row=0, column=1, sticky="ew", padx=8)
         ttk.Label(grid, textvariable=self._tune_tick_var).grid(row=0, column=2, sticky="e")
 
-        ttk.Label(grid, text="每轮帧预算").grid(row=1, column=0, sticky="w")
+        ttk.Label(grid, text=self.tr("tuning.frame_budget", "每轮帧预算")).grid(row=1, column=0, sticky="w")
         ttk.Scale(grid, from_=8, to=80, variable=self._tune_budget_var, orient=tk.HORIZONTAL).grid(row=1, column=1, sticky="ew", padx=8)
         ttk.Label(grid, textvariable=self._tune_budget_var).grid(row=1, column=2, sticky="e")
 
-        ttk.Label(grid, text="重采样").grid(row=2, column=0, sticky="w")
+        ttk.Label(grid, text=self.tr("tuning.resample", "重采样")).grid(row=2, column=0, sticky="w")
         ttk.Combobox(
             grid,
             textvariable=self._tune_resample_var,
             values=list(RESAMPLE_NAME_TO_VALUE.keys()),
             state="readonly",
-            width=12,
+            width=14,
         ).grid(row=2, column=1, sticky="w", padx=8)
 
-        ttk.Label(grid, text="预模糊").grid(row=3, column=0, sticky="w")
+        ttk.Label(grid, text=self.tr("tuning.pre_blur", "预模糊")).grid(row=3, column=0, sticky="w")
         ttk.Scale(grid, from_=0.0, to=0.5, variable=self._tune_blur_var, orient=tk.HORIZONTAL).grid(row=3, column=1, sticky="ew", padx=8)
         ttk.Label(grid, textvariable=self._tune_blur_var).grid(row=3, column=2, sticky="e")
 
-        ttk.Checkbutton(grid, text="开启多段缩放", variable=self._tune_multi_var).grid(row=4, column=0, sticky="w")
-        ttk.Checkbutton(grid, text="开启双通道缩放", variable=self._tune_two_pass_var).grid(row=4, column=1, sticky="w", padx=8)
-        ttk.Checkbutton(grid, text="开启锐化", variable=self._tune_sharpen_var).grid(row=5, column=0, sticky="w")
+        self._tune_multi_check = BoxToggle(
+            grid,
+            self.tr("tuning.multi_step", "开启多段缩放"),
+            self._tune_multi_var,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self._tune_multi_check.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self._tune_two_pass_check = BoxToggle(
+            grid,
+            self.tr("tuning.two_pass", "开启双通道缩放"),
+            self._tune_two_pass_var,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self._tune_two_pass_check.grid(row=4, column=1, sticky="w", padx=8, pady=(4, 0))
+        self._tune_sharpen_check = BoxToggle(
+            grid,
+            self.tr("tuning.sharpen", "开启锐化"),
+            self._tune_sharpen_var,
+            bg=self._theme_bg,
+            fg=self._theme_fg,
+            accent=self._theme_accent,
+            box_size=18,
+            font=self._control_label_font,
+        )
+        self._tune_sharpen_check.grid(row=5, column=0, sticky="w", pady=(4, 0))
         grid.columnconfigure(1, weight=1)
 
         def _apply() -> None:
@@ -1798,8 +2277,8 @@ class PicReadApp:
 
         btns = ttk.Frame(frame)
         btns.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(btns, text="应用", command=_apply).pack(side=tk.LEFT)
-        ttk.Button(btns, text="重置当前模式", command=_reset_mode).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btns, text=self.tr("button.apply", "应用"), command=_apply).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(btns, text=self.tr("button.reset_current_mode", "重置当前模式"), command=_reset_mode).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
 
         self._sync_tuning_panel_from_mode()
 
@@ -1822,17 +2301,32 @@ class PicReadApp:
         mem_mb = self._process_mem_mb()
         mem_text = f"{mem_mb:.0f}MB" if mem_mb > 0 else "N/A"
         if not getattr(self, "drag_drop_enabled", False):
-            drag_text = "拖拽:关"
+            drag_text = self.tr("status.drag_off", "拖拽:关")
         else:
             backend = getattr(self, "drag_drop_backend", "none")
             if backend == "windnd":
-                drag_text = "拖拽:开(windnd)"
+                drag_text = self.tr("status.drag_windnd", "拖拽:开(windnd)")
             elif backend == "win32":
-                drag_text = "拖拽:开(系统)"
+                drag_text = self.tr("status.drag_system", "拖拽:开(系统)")
             else:
-                drag_text = "拖拽:开"
+                drag_text = self.tr("status.drag_on", "拖拽:开")
         self.status_var.set(
-            f"模式: {self.perf_mode_var.get()} | 策略: {profile['strategy']} | 预算: {profile['frame_budget']}帧/轮 | GIF数: {gif_count} | 本轮更新: {updated_frames} | 命中: {ratio:.1f}% | 图像缓存: {photo_cache_entries} | 缩略图缓存: {len(self._thumb_photo_cache)} | 内存: {mem_text} | {drag_text}"
+            self.tr(
+                "status.summary",
+                "模式: {mode} | 负载: {load} | 策略: {strategy} | 预算: {budget}帧/轮 | 缓存上限: {cache_limit} | GIF数: {gif_count} | 本轮更新: {updated} | 命中: {ratio:.1f}% | 图像缓存: {photo_cache} | 缩略图缓存: {thumb_cache} | 内存: {mem} | {drag}",
+                mode=self.perf_mode_label(self.perf_mode_var.get()),
+                load=self.load_profile_label(profile["load_name"]),
+                strategy=self.tr(f"strategy.{profile['strategy']}", profile["strategy"]),
+                budget=profile["frame_budget"],
+                cache_limit=profile["cache_limit"],
+                gif_count=gif_count,
+                updated=updated_frames,
+                ratio=ratio,
+                photo_cache=photo_cache_entries,
+                thumb_cache=len(self._thumb_photo_cache),
+                mem=mem_text,
+                drag=drag_text,
+            )
         )
 
     def _process_mem_mb(self) -> float:
@@ -1927,12 +2421,12 @@ class PicReadApp:
     def _update_template_context_label(self) -> None:
         g = self._selected_group()
         if g is None:
-            self.template_context_var.set("当前目标组：未选择")
+            self.template_context_var.set(self.tr("template.context_none", "当前目标组：未选择"))
             return
         if g.template_path:
-            self.template_context_var.set(f"当前目标组：{g.name}（关联模板：{g.template_path.stem}）")
+            self.template_context_var.set(self.tr("template.context_linked", "当前目标组：{name}（关联模板：{template}）", name=g.name, template=g.template_path.stem))
         else:
-            self.template_context_var.set(f"当前目标组：{g.name}（未关联模板）")
+            self.template_context_var.set(self.tr("template.context_unlinked", "当前目标组：{name}（未关联模板）", name=g.name))
 
     def refresh_template_library(self) -> None:
         prev_selected_path: Optional[Path] = None
@@ -1968,18 +2462,19 @@ class PicReadApp:
                 }
             )
 
-        selected_tag = self.template_tag_var.get() if hasattr(self, "template_tag_var") else "全部"
+        all_tag_label = self.tr("template.all", "全部")
+        selected_tag = self.template_tag_var.get() if hasattr(self, "template_tag_var") else all_tag_label
         search = self.template_search_var.get().strip().lower() if hasattr(self, "template_search_var") else ""
         if hasattr(self, "template_tag_combo"):
-            values = ["全部"] + sorted(all_tags)
+            values = [all_tag_label] + sorted(all_tags)
             self.template_tag_combo.configure(values=values)
             if selected_tag not in values:
-                selected_tag = "全部"
-                self.template_tag_var.set("全部")
+                selected_tag = all_tag_label
+                self.template_tag_var.set(all_tag_label)
 
         self.template_entries = []
         for ent in all_entries:
-            if selected_tag != "全部" and selected_tag not in ent["tags"]:
+            if selected_tag != all_tag_label and selected_tag not in ent["tags"]:
                 continue
             if search:
                 hay = f"{ent['name']} {' '.join(ent['tags'])} {ent['path'].stem}".lower()
@@ -1989,10 +2484,10 @@ class PicReadApp:
 
         self.template_list.delete(0, tk.END)
         for ent in self.template_entries:
-            mode = "smart" if ent["smart"] else "fixed"
+            mode = self.tr("template.mode_smart", "smart") if ent["smart"] else self.tr("template.mode_fixed", "fixed")
             tag_text = f" | tags={','.join(ent['tags'])}" if ent["tags"] else ""
             self.template_list.insert(
-                tk.END, f"{ent['name']} | {mode} rows={ent['rows']} | images={ent['count']}{tag_text}"
+                tk.END, f"{ent['name']} | {mode} rows={ent['rows']} | {self.tr('template.images_short', 'images')}={ent['count']}{tag_text}"
             )
         if self.template_entries:
             pick_idx = 0
@@ -2045,10 +2540,10 @@ class PicReadApp:
 
             preview = ent["preview"]
             if preview and Path(preview).is_file():
-                image_id = c.create_text(x0 + card_w // 2, y0 + 54, text="加载中...", fill="#9a9a9a")
+                image_id = c.create_text(x0 + card_w // 2, y0 + 54, text=self.tr("template.loading_preview", "加载中..."), fill="#9a9a9a")
                 thumb_tasks.append((idx, preview, image_id, x0 + card_w // 2))
             else:
-                c.create_text(x0 + card_w // 2, y0 + 54, text="No Preview", fill="#9a9a9a")
+                c.create_text(x0 + card_w // 2, y0 + 54, text=self.tr("template.no_preview", "No Preview"), fill="#9a9a9a")
 
             c.create_text(
                 x0 + 8,
@@ -2058,11 +2553,11 @@ class PicReadApp:
                 anchor="nw",
                 width=card_w - 16,
             )
-            mode = "smart" if ent["smart"] else "fixed"
+            mode = self.tr("template.mode_smart", "smart") if ent["smart"] else self.tr("template.mode_fixed", "fixed")
             c.create_text(
                 x0 + 8,
                 y0 + 156,
-                text=f"{mode} rows={ent['rows']}\n{ent['count']} imgs",
+                text=f"{mode} rows={ent['rows']}\n{ent['count']} {self.tr('template.imgs_short', 'imgs')}",
                 fill="#9a9a9a",
                 anchor="nw",
                 width=card_w - 16,
@@ -2121,7 +2616,7 @@ class PicReadApp:
             _idx, preview, text_item_id, center_x = tasks[i]
             tk_img = self._get_or_build_thumb(preview, 156, 96)
             if tk_img is None:
-                c.itemconfigure(text_item_id, text="No Preview")
+                c.itemconfigure(text_item_id, text=self.tr("template.no_preview", "No Preview"))
                 continue
             self.template_thumbs.append(tk_img)
             x, y = c.coords(text_item_id)
@@ -2153,8 +2648,10 @@ class PicReadApp:
     def _build_history_tab(self, history_tab: ttk.Frame) -> None:
         top = ttk.Frame(history_tab)
         top.pack(fill=tk.X)
-        ttk.Button(top, text="刷新历史", command=self.refresh_history_library).pack(side=tk.LEFT)
-        ttk.Button(top, text="打开所选历史", command=self.open_selected_history).pack(side=tk.LEFT, padx=8)
+        self.history_refresh_btn = ttk.Button(top, text=self.tr("button.refresh_history", "刷新历史"), command=self.refresh_history_library)
+        self.history_refresh_btn.pack(side=tk.LEFT)
+        self.history_open_btn = ttk.Button(top, text=self.tr("button.open_selected_history", "打开所选历史"), command=self.open_selected_history)
+        self.history_open_btn.pack(side=tk.LEFT, padx=8)
 
         body = ttk.Frame(history_tab)
         body.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
@@ -2174,7 +2671,7 @@ class PicReadApp:
 
         if SESSION_FILE.exists():
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(SESSION_FILE.stat().st_mtime))
-            self.history_list.insert(tk.END, f"[最新自动会话] session.json ({ts})")
+            self.history_list.insert(tk.END, self.tr("history.latest_session", "[最新自动会话] session.json ({ts})", ts=ts))
             self.history_entries.append(SESSION_FILE)
 
         for p in sorted(HISTORY_DIR.glob("session_*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
@@ -2190,18 +2687,18 @@ class PicReadApp:
             return
         sel = self.history_list.curselection()
         if not sel:
-            messagebox.showinfo("提示", "请先选择一条历史记录。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_history_first", "请先选择一条历史记录。"))
             return
         p = self.history_entries[sel[0]]
         if self.groups:
-            ok = messagebox.askyesno("恢复会话", "恢复会话会替换当前窗口组，是否继续？")
+            ok = messagebox.askyesno(self.tr("msg.restore_session", "恢复会话"), self.tr("msg.restore_session_confirm", "恢复会话会替换当前窗口组，是否继续？"))
             if not ok:
                 return
         self.load_session(path=p, silent=False, replace_existing=True)
 
     def _choose_from_entries(self, title: str, entries: list[tuple[str, Path]]) -> Optional[Path]:
         if not entries:
-            messagebox.showinfo("提示", "当前没有可用记录。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.no_records", "当前没有可用记录。"))
             return None
 
         result: dict[str, Optional[Path]] = {"path": None}
@@ -2239,8 +2736,8 @@ class PicReadApp:
 
         btns = ttk.Frame(win)
         btns.pack(fill=tk.X, padx=12, pady=12)
-        ttk.Button(btns, text="打开", command=_open_selected).pack(side=tk.LEFT)
-        ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text=self.tr("button.open", "打开"), command=_open_selected).pack(side=tk.LEFT)
+        ttk.Button(btns, text=self.tr("button.cancel", "取消"), command=win.destroy).pack(side=tk.RIGHT)
 
         self.root.wait_window(win)
         return result["path"]
@@ -2262,12 +2759,12 @@ class PicReadApp:
         body.pack(fill=tk.BOTH, expand=True)
         ttk.Label(body, text=title, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor="w", pady=(0, 10))
 
-        ttk.Label(body, text="模板名称").pack(anchor="w")
+        ttk.Label(body, text=self.tr("template.name", "模板名称")).pack(anchor="w")
         name_var = tk.StringVar(value=default_name)
         name_entry = ttk.Entry(body, textvariable=name_var, width=40)
         name_entry.pack(fill=tk.X, pady=(4, 10))
 
-        ttk.Label(body, text="分类 / 标签（逗号分隔，可留空）").pack(anchor="w")
+        ttk.Label(body, text=self.tr("template.tags_hint", "分类 / 标签（逗号分隔，可留空）")).pack(anchor="w")
         tags_var = tk.StringVar(value=",".join(default_tags or []))
         tags_entry = ttk.Entry(body, textvariable=tags_var, width=40)
         tags_entry.pack(fill=tk.X, pady=(4, 0))
@@ -2275,17 +2772,17 @@ class PicReadApp:
         def _confirm() -> None:
             name = name_var.get().strip()
             if not name:
-                messagebox.showinfo("提示", "模板名称不能为空。", parent=win)
+                messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.template_name_required", "模板名称不能为空。"), parent=win)
                 return
             result["value"] = (name, self._parse_tags(tags_var.get()))
             win.destroy()
 
-        ttk.Label(body, text="留空表示不分类。", foreground="#9da5b4").pack(anchor="w", pady=(10, 0))
+        ttk.Label(body, text=self.tr("template.tags_empty_hint", "留空表示不分类。"), foreground="#9da5b4").pack(anchor="w", pady=(10, 0))
 
         btns = ttk.Frame(win, padding=(16, 0, 16, 16))
         btns.pack(fill=tk.X, side=tk.BOTTOM)
-        ttk.Button(btns, text="确定", command=_confirm).pack(side=tk.LEFT)
-        ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text=self.tr("button.confirm", "确定"), command=_confirm).pack(side=tk.LEFT)
+        ttk.Button(btns, text=self.tr("button.cancel", "取消"), command=win.destroy).pack(side=tk.RIGHT)
 
         win.update_idletasks()
         req_w = max(560, win.winfo_reqwidth() + 24)
@@ -2346,7 +2843,7 @@ class PicReadApp:
         return group
 
     def create_group(self) -> None:
-        name = self.group_name_var.get().strip() or "窗口组"
+        name = self.group_name_var.get().strip() or self._default_group_name()
         rows = max(1, int(self.rows_var.get() or 1))
         smart_layout = bool(self.smart_layout_var.get())
         layout_algorithm = self._layout_algo_key_from_var()
@@ -2362,13 +2859,13 @@ class PicReadApp:
             if gid not in self.groups:
                 continue
             g = self.groups[gid]
-            mode = "smart" if g.smart_layout else "fixed"
-            algo = f" | algo={LAYOUT_ALGORITHMS.get(g.layout_algorithm, '算法1')}" if g.smart_layout else ""
+            mode = self.tr("list.layout_smart", "smart") if g.smart_layout else self.tr("list.layout_fixed", "fixed")
+            algo = f" | {self.tr('list.algorithm', 'algo')}={self.tr(f'layout.{g.layout_algorithm}', LAYOUT_ALGORITHMS.get(g.layout_algorithm, '算法1'))}" if g.smart_layout else ""
             tpl = " | tpl" if g.template_path else ""
             pin = " [PIN]" if gid in self._pinned_groups else ""
             self.group_list.insert(
                 tk.END,
-                f"{gid}# {g.name}{pin} | layout={mode} rows={g.rows}{algo} | images={len(g.items)}{tpl}",
+                f"{gid}# {g.name}{pin} | {self.tr('list.layout', 'layout')}={mode} rows={g.rows}{algo} | {self.tr('list.images', 'images')}={len(g.items)}{tpl}",
             )
 
         if target_gid is not None and target_gid in self._group_order:
@@ -2402,14 +2899,14 @@ class PicReadApp:
     def add_images(self) -> None:
         g = self._selected_group()
         if not g:
-            messagebox.showinfo("提示", "请先在列表里选择一个窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_in_list", "请先在列表里选择一个窗口组。"))
             return
 
         paths = filedialog.askopenfilenames(
-            title="选择图片",
+            title=self.tr("dialog.choose_images", "选择图片"),
             filetypes=[
-                ("图片", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
-                ("所有文件", "*.*"),
+                (self.tr("dialog.image_files", "图片"), "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+                (self.tr("dialog.all_files", "所有文件"), "*.*"),
             ],
         )
         if not paths:
@@ -2417,7 +2914,7 @@ class PicReadApp:
 
         normalized = self._collect_supported_paths(paths)
         if not normalized:
-            messagebox.showwarning("提示", "没有选中受支持的图片类型。")
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.no_supported_images_selected", "没有选中受支持的图片类型。"))
             return
 
         self.add_paths_to_group(g, normalized)
@@ -2425,7 +2922,7 @@ class PicReadApp:
     def update_layout(self) -> None:
         g = self._selected_group()
         if not g:
-            messagebox.showinfo("提示", "请先在列表里选择一个窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_in_list", "请先在列表里选择一个窗口组。"))
             return
 
         rows = max(1, int(self.rows_var.get() or 1))
@@ -2469,7 +2966,7 @@ class PicReadApp:
     def save_group_template(self, group: Optional[GroupWindow] = None) -> None:
         g = group or self._selected_group()
         if not g:
-            messagebox.showinfo("提示", "请先选择一个窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_first", "请先选择一个窗口组。"))
             return
 
         default_name = g.name
@@ -2481,7 +2978,7 @@ class PicReadApp:
             except Exception:
                 existing_tags = []
 
-        meta = self._prompt_template_meta("保存模板", default_name, existing_tags)
+        meta = self._prompt_template_meta(self.tr("dialog.save_template", "保存模板"), default_name, existing_tags)
         if not meta:
             return
         name, tags = meta
@@ -2492,15 +2989,15 @@ class PicReadApp:
         file_path = TEMPLATE_DIR / self._safe_template_filename(name)
         current_path = g.template_path.resolve() if g.template_path and g.template_path.exists() else None
         if file_path.exists() and file_path.resolve() != current_path:
-            messagebox.showwarning("提示", "同名模板已存在，请换一个模板名称。")
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.template_name_exists", "同名模板已存在，请换一个模板名称。"))
             return
         try:
             file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             g.template_path = file_path
             self.refresh_template_library()
-            messagebox.showinfo("完成", f"模板已保存:\n{file_path.name}")
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_saved", "模板已保存:\n{name}", name=file_path.name))
         except Exception as exc:
-            messagebox.showerror("保存失败", str(exc))
+            messagebox.showerror(self.tr("msg.save_failed", "保存失败"), str(exc))
 
     def persist_template_geometry(self, g: GroupWindow) -> None:
         if g.suppress_template_geometry_persist:
@@ -2516,7 +3013,7 @@ class PicReadApp:
             self.refresh_template_library()
             ent = self._selected_template_entry()
         if ent is None:
-            messagebox.showinfo("提示", "请先在模板库中选择一个模板。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
             return
 
         data = ent["data"]
@@ -2543,10 +3040,10 @@ class PicReadApp:
     def update_linked_template(self, group: Optional[GroupWindow] = None) -> None:
         g = group or self._selected_group()
         if g is None:
-            messagebox.showinfo("提示", "请先选择一个目标窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_first", "请先选择一个目标窗口组。"))
             return
         if not g.template_path:
-            messagebox.showinfo("提示", "当前组没有关联模板，请先“保存为模板”。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.group_not_linked_template", "当前组没有关联模板，请先“保存为模板”。"))
             return
 
         current_template_name = g.template_path.stem
@@ -2563,23 +3060,23 @@ class PicReadApp:
         try:
             g.template_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self.refresh_template_library()
-            messagebox.showinfo("完成", f"已更新模板: {g.template_path.name}")
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_updated", "已更新模板: {name}", name=g.template_path.name))
         except Exception as exc:
-            messagebox.showerror("更新失败", str(exc))
+            messagebox.showerror(self.tr("msg.update_failed", "更新失败"), str(exc))
 
     def reload_linked_template(self, group: Optional[GroupWindow] = None) -> None:
         g = group or self._selected_group()
         if g is None:
-            messagebox.showinfo("提示", "请先选择一个目标窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_first", "请先选择一个目标窗口组。"))
             return
         if not g.template_path or not g.template_path.exists():
-            messagebox.showinfo("提示", "当前组没有可用的关联模板。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.group_no_available_template", "当前组没有可用的关联模板。"))
             return
 
         try:
             data = json.loads(g.template_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            messagebox.showerror("读取失败", str(exc))
+            messagebox.showerror(self.tr("msg.read_failed", "读取失败"), str(exc))
             return
 
         g.name = self._template_display_name(data, g.template_path.stem)
@@ -2599,11 +3096,11 @@ class PicReadApp:
     def rename_selected_template(self) -> None:
         ent = self._selected_template_entry()
         if ent is None:
-            messagebox.showinfo("提示", "请先在模板库中选择一个模板。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
             return
 
         old_name = ent["name"]
-        new_name = simpledialog.askstring("重命名模板", "新模板名称:", initialvalue=old_name)
+        new_name = simpledialog.askstring(self.tr("dialog.rename_template", "重命名模板"), self.tr("dialog.new_template_name", "新模板名称:"), initialvalue=old_name)
         if not new_name:
             return
         new_name = new_name.strip()
@@ -2613,13 +3110,13 @@ class PicReadApp:
         old_path: Path = ent["path"]
         new_path = TEMPLATE_DIR / self._safe_template_filename(new_name)
         if new_path.exists() and new_path != old_path:
-            messagebox.showwarning("提示", "同名模板已存在，请换一个名称。")
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.template_name_exists_rename", "同名模板已存在，请换一个名称。"))
             return
 
         try:
             data = json.loads(old_path.read_text(encoding="utf-8"))
         except Exception as exc:
-            messagebox.showerror("读取失败", str(exc))
+            messagebox.showerror(self.tr("msg.read_failed", "读取失败"), str(exc))
             return
 
         data["template_name"] = new_name
@@ -2635,9 +3132,9 @@ class PicReadApp:
                 if g.template_path == old_path:
                     g.template_path = new_path
             self.refresh_template_library()
-            messagebox.showinfo("完成", f"模板已重命名为: {new_name}")
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_renamed", "模板已重命名为: {name}", name=new_name))
         except Exception as exc:
-            messagebox.showerror("重命名失败", str(exc))
+            messagebox.showerror(self.tr("msg.rename_failed", "重命名失败"), str(exc))
 
     def _parse_tags(self, text: str) -> list[str]:
         out: list[str] = []
@@ -2650,12 +3147,12 @@ class PicReadApp:
     def edit_selected_template_tags(self) -> None:
         ent = self._selected_template_entry()
         if ent is None:
-            messagebox.showinfo("提示", "请先在模板库中选择一个模板。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
             return
         old_tags = ent.get("tags", [])
         text = simpledialog.askstring(
-            "编辑标签",
-            "标签（逗号分隔）:",
+            self.tr("dialog.edit_tags", "编辑标签"),
+            self.tr("dialog.tags_prompt", "标签（逗号分隔）:"),
             initialvalue=",".join(old_tags),
         )
         if text is None:
@@ -2668,17 +3165,17 @@ class PicReadApp:
             p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self.refresh_template_library()
         except Exception as exc:
-            messagebox.showerror("标签更新失败", str(exc))
+            messagebox.showerror(self.tr("msg.tag_update_failed", "标签更新失败"), str(exc))
 
     def delete_selected_template(self) -> None:
         ent = self._selected_template_entry()
         if ent is None:
-            messagebox.showinfo("提示", "请先在模板库中选择一个模板。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
             return
 
         p: Path = ent["path"]
         display_name = ent["name"]
-        ok = messagebox.askyesno("删除模板", f"确定删除模板“{display_name}”吗？\n\n此操作不会删除原始图片文件。")
+        ok = messagebox.askyesno(self.tr("dialog.delete_template", "删除模板"), self.tr("msg.delete_template_confirm", "确定删除模板“{name}”吗？\n\n此操作不会删除原始图片文件。", name=display_name))
         if not ok:
             return
 
@@ -2692,7 +3189,7 @@ class PicReadApp:
             self.template_selected_idx = None
             self.refresh_template_library()
         except Exception as exc:
-            messagebox.showerror("删除失败", str(exc))
+            messagebox.showerror(self.tr("msg.delete_failed", "删除失败"), str(exc))
 
     def _session_payload(self) -> dict:
         ordered_existing = [gid for gid in self._group_order if gid in self.groups]
@@ -2703,6 +3200,9 @@ class PicReadApp:
         }
 
     def _write_history_snapshot(self, payload: dict) -> None:
+        groups = payload.get("groups", [])
+        if not groups:
+            return
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         snap = HISTORY_DIR / f"session_{stamp}.json"
         snap.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2724,10 +3224,10 @@ class PicReadApp:
             self._dirty = False
             self._last_save_ts = time.time()
             if not silent:
-                messagebox.showinfo("完成", "会话已保存。")
+                messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.session_saved", "会话已保存。"))
         except Exception as exc:
             if not silent:
-                messagebox.showerror("保存失败", str(exc))
+                messagebox.showerror(self.tr("msg.save_failed", "保存失败"), str(exc))
 
     def save_session_snapshot(self) -> None:
         self.save_session(silent=False, snapshot=True)
@@ -2761,20 +3261,24 @@ class PicReadApp:
         src = path or SESSION_FILE
         if not src.exists():
             if not silent:
-                messagebox.showinfo("提示", "当前没有可恢复的会话文件。")
+                messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.no_session_file", "当前没有可恢复的会话文件。"))
             return
 
         try:
             payload = json.loads(src.read_text(encoding="utf-8"))
         except Exception as exc:
             if not silent:
-                messagebox.showerror("读取失败", str(exc))
+                messagebox.showerror(self.tr("msg.read_failed", "读取失败"), str(exc))
             return
 
         groups = payload.get("groups", [])
         if not isinstance(groups, list):
             if not silent:
-                messagebox.showerror("读取失败", "会话格式不正确。")
+                messagebox.showerror(self.tr("msg.read_failed", "读取失败"), self.tr("msg.invalid_session_format", "会话格式不正确。"))
+            return
+        if not groups:
+            if not silent:
+                messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.empty_history_session", "这条记录里没有窗口组可恢复。"))
             return
 
         self._suspend_dirty = True
@@ -2783,7 +3287,7 @@ class PicReadApp:
                 self._close_all_groups()
 
             for item in groups:
-                name = str(item.get("name", "窗口组")).strip() or "窗口组"
+                name = str(item.get("name", self._default_group_name())).strip() or self._default_group_name()
                 rows = max(1, int(item.get("rows", 2)))
                 smart = bool(item.get("smart_layout", True))
                 layout_algorithm = str(item.get("layout_algorithm", "legacy")).strip() or "legacy"
@@ -2811,7 +3315,7 @@ class PicReadApp:
 
         self._dirty = False
         if not silent:
-            messagebox.showinfo("完成", "会话恢复完成。")
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.session_restored", "会话恢复完成。"))
 
     def _choose_merge_sources(self, target_gid: int) -> list[int]:
         others = [gid for gid in self._group_order if gid != target_gid and gid in self.groups]
@@ -2821,15 +3325,15 @@ class PicReadApp:
         result: dict[str, list[int]] = {"gids": []}
         win = tk.Toplevel(self.root)
         self.apply_window_icon(win)
-        win.title("选择要合并的窗口组")
+        win.title(self.tr("dialog.choose_merge_groups", "选择要合并的窗口组"))
         self._center_window(win, 520, 400)
         win.transient(self.root)
         win.grab_set()
 
-        ttk.Label(win, text="选择要并入当前目标组的窗口组", font=("Microsoft YaHei UI", 11, "bold")).pack(
+        ttk.Label(win, text=self.tr("merge.choose_title", "选择要并入当前目标组的窗口组"), font=("Microsoft YaHei UI", 11, "bold")).pack(
             anchor="w", padx=12, pady=(12, 4)
         )
-        ttk.Label(win, text="按列表顺序合并，源窗口会被关闭，组内图片顺序会保持不变。").pack(
+        ttk.Label(win, text=self.tr("merge.choose_hint", "按列表顺序合并，源窗口会被关闭，组内图片顺序会保持不变。")).pack(
             anchor="w", padx=12, pady=(0, 8)
         )
 
@@ -2855,8 +3359,8 @@ class PicReadApp:
         lb.bind("<Return>", lambda _e: _ok())
         btns = ttk.Frame(win)
         btns.pack(fill=tk.X, padx=12, pady=12)
-        ttk.Button(btns, text="合并", command=_ok).pack(side=tk.LEFT)
-        ttk.Button(btns, text="取消", command=win.destroy).pack(side=tk.RIGHT)
+        ttk.Button(btns, text=self.tr("button.merge", "合并"), command=_ok).pack(side=tk.LEFT)
+        ttk.Button(btns, text=self.tr("button.cancel", "取消"), command=win.destroy).pack(side=tk.RIGHT)
 
         lb.focus_set()
         self.root.wait_window(win)
@@ -2865,7 +3369,7 @@ class PicReadApp:
     def merge_groups(self) -> None:
         target = self._selected_group()
         if target is None:
-            messagebox.showinfo("提示", "请先在列表中选择目标窗口组。")
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_in_list", "请先在列表中选择目标窗口组。"))
             return
 
         source_gids = self._choose_merge_sources(target.group_id)
@@ -2906,14 +3410,22 @@ class PicReadApp:
 
         now = time.time()
         profile = self.current_profile()
-        remaining_budget = int(profile["frame_budget"])
         updated_total = 0
-        for g in list(self.groups.values()):
-            if remaining_budget <= 0:
+        groups_with_gifs = [(g, g.gif_item_count()) for g in list(self.groups.values())]
+        groups_with_gifs = [(g, gif_count) for g, gif_count in groups_with_gifs if gif_count > 0]
+        remaining_budget = int(profile["frame_budget"])
+        remaining_weight = sum(gif_count for _, gif_count in groups_with_gifs)
+        for idx, (g, gif_count) in enumerate(groups_with_gifs):
+            if remaining_budget <= 0 or remaining_weight <= 0:
                 break
-            used = g.tick_gif(now, frame_budget=max(4, remaining_budget // max(1, len(self.groups))))
-            remaining_budget -= used
+            if idx == len(groups_with_gifs) - 1:
+                allocation = remaining_budget
+            else:
+                allocation = max(1, int(round(remaining_budget * gif_count / remaining_weight)))
+            used = g.tick_gif(now, frame_budget=allocation)
             updated_total += used
+            remaining_budget -= used
+            remaining_weight -= gif_count
         self._last_tick_updated = updated_total
         self._update_status(updated_total, now)
 

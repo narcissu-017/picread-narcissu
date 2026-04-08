@@ -25,14 +25,22 @@ It works especially well when you want to:
 - Drag and drop image import
 - Performance modes and tuning panel
 
+## **2026-04-09 · Version 0.85**
+- Refined the toolbar layout for the Groups and Templates tabs.
+- Added language switching and improved English UI coverage.
+- Added load presets for heavy GIF usage.
+- Improved cache handling during window resizing to reduce runaway memory growth.
+
 ## Download and Use
 A ready-to-run build is included in this repository:
 - `dist/PicRead.exe`
 
 Usage notes:
 - Running the EXE does not require Python to be installed.
+- The current one-file build includes its UI language files and icon resources, so `PicRead.exe` can run on its own.
 - On first launch, the app creates its own local state folder under `dist/state/`.
 - If you move the EXE, it is best to move the entire `dist` folder together.
+- **2026-04-09 · Playback note:** When many GIFs are open at the same time, or when you resize window groups, the app may pause briefly while rebuilding its cache. Playback should return to normal once the cache settles. If it still feels sluggish, try a higher load preset for more aggressive caching and a larger update budget.
 
 ## Run from Source
 Environment:
