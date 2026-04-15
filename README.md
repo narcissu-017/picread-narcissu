@@ -31,6 +31,12 @@ It works especially well when you want to:
 - Added load presets for heavy GIF usage.
 - Improved cache handling during window resizing to reduce runaway memory growth.
 
+## **2026-04-15 · Version 0.87**
+- Further improved responsiveness when resizing windows and reorganizing large GIF-heavy groups.
+- Improved template save/update dialog behavior to reduce cases where a hidden dialog could make the app look stuck.
+- Clicking an already selected image now clears the selection highlight immediately.
+- The image-window context menu now includes a restart action for replaying every GIF in the current window from the beginning.
+
 ## Download and Use
 A ready-to-run build is included in this repository:
 - `dist/PicRead.exe`
@@ -68,6 +74,12 @@ Or double-click:
 5. Right-click or press `Delete` to remove selected items from the current group.
 6. Use the template library to save and reopen common image sets.
 7. Use history to restore recent viewing states.
+
+## Review Helpers
+- Load presets make it easier to adapt the app to different machines and GIF-heavy workloads.
+- Clicking a selected image again clears the highlight so you can inspect it without the selection frame.
+- Right-click inside an image window to replay all GIFs in that window from frame one.
+- Templates can be saved, updated, and reloaded for repeated review sessions.
 
 ## Templates and History
 - Templates are useful for saving common image combinations, order, and layout settings.

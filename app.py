@@ -4,7 +4,9 @@ import ast
 import ctypes
 import hashlib
 import json
+import locale
 import math
+import os
 import queue
 import re
 import sys
@@ -25,6 +27,7 @@ try:
 except Exception:
     windnd = None
 
+APP_VERSION = "0.87"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -417,12 +420,16 @@ class GroupWindow:
         self._cell_h = 1
         self._layout_rects: list[tuple[int, int, int, int]] = []
         self._slot_image_ids: list[int] = []
+        self._slot_frame_ids: list[int] = []
         self._slot_draw_sizes: list[tuple[int, int]] = []
         self._cell_lookup_rects: list[tuple[int, int, int, int]] = []
 
         self._drag_source_idx: Optional[int] = None
         self._drag_target_idx: Optional[int] = None
         self._drag_active = False
+        self._drag_moved = False
+        self._press_xy: Optional[tuple[int, int]] = None
+        self._press_on_selected_idx: Optional[int] = None
         self._selected_idx: Optional[int] = None
         self._selected_indexes: set[int] = set()
         self._context_idx: Optional[int] = None
@@ -438,9 +445,13 @@ class GroupWindow:
         self.suppress_template_geometry_persist = False
         self._resize_after_id: Optional[str] = None
         self._resizing_until = 0.0
+        self._static_render_token = 0
+        self._render_batch_after_id: Optional[str] = None
+        self._geometry_idle_ms = 950
 
         self._menu = tk.Menu(self.top, tearoff=0)
         self._menu.add_command(label=self.app.tr("menu.remove_image", "从窗口组移除图片"), command=self._remove_context_item)
+        self._menu.add_command(label=self.app.tr("menu.restart_all_gifs", "重播本窗口所有 GIF"), command=self._restart_all_gifs)
         self._menu.add_separator()
         self._menu.add_command(label=self.app.tr("button.save_template", "保存为模板"), command=self._save_as_template_here)
         self._menu.add_command(label=self.app.tr("button.update_template", "更新该模板"), command=self._update_template_here)
@@ -461,14 +472,29 @@ class GroupWindow:
     def _reload_template_here(self) -> None:
         self.app.reload_linked_template(self)
 
+    def _restart_all_gifs(self) -> None:
+        restarted = False
+        for item in self.items:
+            if not item.is_gif or not item.gif_frames:
+                continue
+            item.gif_index = 0
+            item.next_due = 0.0
+            restarted = True
+        if not restarted:
+            return
+        self._gif_round_robin_start = 0
+        self.app.pause_heavy_work(0.25)
+        self.render(force=True)
+
     def _update_title(self) -> None:
         self.top.title(self.name)
 
     def refresh_localized_texts(self) -> None:
         self._menu.entryconfigure(0, label=self.app.tr("menu.remove_image", "从窗口组移除图片"))
-        self._menu.entryconfigure(2, label=self.app.tr("button.save_template", "保存为模板"))
-        self._menu.entryconfigure(3, label=self.app.tr("button.update_template", "更新该模板"))
-        self._menu.entryconfigure(4, label=self.app.tr("button.reload_template", "重新加载模板"))
+        self._menu.entryconfigure(1, label=self.app.tr("menu.restart_all_gifs", "重播本窗口所有 GIF"))
+        self._menu.entryconfigure(3, label=self.app.tr("button.save_template", "保存为模板"))
+        self._menu.entryconfigure(4, label=self.app.tr("button.update_template", "更新该模板"))
+        self._menu.entryconfigure(5, label=self.app.tr("button.reload_template", "重新加载模板"))
 
     def set_layout(self, rows: int, smart_layout: bool, layout_algorithm: Optional[str] = None) -> None:
         self.rows = max(1, rows)
@@ -526,27 +552,43 @@ class GroupWindow:
             "images": [str(i.path) for i in self.items],
         }
 
+    def _cancel_render_batch(self) -> None:
+        if self._render_batch_after_id:
+            try:
+                self.top.after_cancel(self._render_batch_after_id)
+            except Exception:
+                pass
+            self._render_batch_after_id = None
+        self._static_render_token += 1
+
     def _on_resize(self, _evt: tk.Event) -> None:
         current_geo = self.top.geometry()
-        if current_geo != self._last_geometry:
+        geometry_changed = current_geo != self._last_geometry
+        if geometry_changed:
             self._last_geometry = current_geo
             self.app.mark_dirty()
+            self._resizing_until = time.time() + (self._geometry_idle_ms / 1000.0)
+            self.app.pause_heavy_work(self._geometry_idle_ms / 1000.0)
+            self._cancel_render_batch()
 
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         if w <= 1 or h <= 1:
             return
-        if (w, h) != self._last_layout_size:
-            self._resizing_until = time.time() + 0.28
+        if geometry_changed or (w, h) != self._last_layout_size:
             if self._resize_after_id:
                 try:
                     self.top.after_cancel(self._resize_after_id)
                 except Exception:
                     pass
-            self._resize_after_id = self.top.after(140, self._flush_resize_render)
+            self._resize_after_id = self.top.after(self._geometry_idle_ms, self._flush_resize_render)
 
     def _flush_resize_render(self) -> None:
         self._resize_after_id = None
+        remaining = self._resizing_until - time.time()
+        if remaining > 0:
+            self._resize_after_id = self.top.after(max(20, int(remaining * 1000)), self._flush_resize_render)
+            return
         size_now = (self.canvas.winfo_width(), self.canvas.winfo_height())
         if size_now != self._last_layout_size:
             self._photo_cache.clear()
@@ -923,8 +965,12 @@ class GroupWindow:
 
     def _on_press(self, evt: tk.Event) -> None:
         self.app.set_active_group(self.group_id)
+        self.app.pause_heavy_work(0.8)
         self.canvas.focus_set()
         idx = self._index_from_xy(evt.x, evt.y)
+        self._press_xy = (evt.x, evt.y)
+        self._drag_moved = False
+        self._press_on_selected_idx = idx if idx is not None and idx in self._selected_indexes else None
         ctrl_down = bool(evt.state & 0x0004)
         shift_down = bool(evt.state & 0x0001)
 
@@ -935,7 +981,7 @@ class GroupWindow:
             self._select_box_current = (evt.x, evt.y)
             if not ctrl_down:
                 self._selected_indexes.clear()
-            self.render(force=True)
+            self._redraw_overlays()
             return
 
         self._selected_idx = idx
@@ -943,6 +989,7 @@ class GroupWindow:
             self._drag_active = False
             if not ctrl_down:
                 self._selected_indexes.clear()
+            self._redraw_overlays()
             return
 
         if ctrl_down:
@@ -954,7 +1001,7 @@ class GroupWindow:
                 self._selected_indexes.add(idx)
                 self._selected_idx = idx
             self._drag_active = False
-            self.render(force=True)
+            self._redraw_overlays()
             return
 
         self._selected_indexes = {idx}
@@ -963,9 +1010,15 @@ class GroupWindow:
         self._drag_target_idx = idx
 
     def _on_drag(self, evt: tk.Event) -> None:
+        self.app.pause_heavy_work(0.45)
+        if self._press_xy is not None:
+            dx = abs(evt.x - self._press_xy[0])
+            dy = abs(evt.y - self._press_xy[1])
+            if dx >= 4 or dy >= 4:
+                self._drag_moved = True
         if self._select_box_active:
             self._select_box_current = (evt.x, evt.y)
-            self.render(force=True)
+            self._redraw_overlays()
             return
         if not self._drag_active:
             return
@@ -974,9 +1027,10 @@ class GroupWindow:
             return
         if idx != self._drag_target_idx:
             self._drag_target_idx = idx
-            self.render(force=True)
+            self._redraw_overlays()
 
     def _on_release(self, _evt: tk.Event) -> None:
+        self.app.pause_heavy_work(0.8)
         if self._select_box_active:
             self._select_box_active = False
             start = self._select_box_start
@@ -994,10 +1048,12 @@ class GroupWindow:
                         selected.append(idx)
                 self._selected_indexes.update(selected)
                 self._selected_idx = min(self._selected_indexes) if self._selected_indexes else None
-            self.render(force=True)
+            self._redraw_overlays()
             return
 
         if not self._drag_active:
+            self._press_xy = None
+            self._press_on_selected_idx = None
             return
 
         src = self._drag_source_idx
@@ -1006,8 +1062,22 @@ class GroupWindow:
         self._drag_source_idx = None
         self._drag_target_idx = None
 
+        if not self._drag_moved and src is not None and src == dst and self._press_on_selected_idx == src:
+            self._selected_indexes.discard(src)
+            if self._selected_idx == src:
+                self._selected_idx = next(iter(self._selected_indexes), None)
+            self._press_xy = None
+            self._press_on_selected_idx = None
+            self._drag_moved = False
+            self._redraw_overlays()
+            return
+
+        self._press_xy = None
+        self._press_on_selected_idx = None
+        self._drag_moved = False
+
         if src is None or dst is None or src == dst:
-            self.render(force=True)
+            self._redraw_overlays()
             return
 
         moving = self.items.pop(src)
@@ -1020,6 +1090,7 @@ class GroupWindow:
 
     def _on_right_click(self, evt: tk.Event) -> None:
         self.app.set_active_group(self.group_id)
+        self.app.pause_heavy_work(1.2)
         idx = self._index_from_xy(evt.x, evt.y)
         self._context_idx = idx
         if idx is not None:
@@ -1027,11 +1098,14 @@ class GroupWindow:
             if idx not in self._selected_indexes:
                 self._selected_indexes = {idx}
         remove_count = len(self._selected_indexes) if self._selected_indexes else (1 if idx is not None else 0)
+        self._redraw_overlays()
         remove_label = self.app.tr("menu.remove_selected_images", "从窗口组移除所选图片") if remove_count > 1 else self.app.tr("menu.remove_image", "从窗口组移除图片")
         self._menu.entryconfigure(0, label=remove_label, state=("normal" if remove_count > 0 else "disabled"))
+        has_gif = any(item.is_gif and item.gif_frames for item in self.items)
+        self._menu.entryconfigure(1, state=("normal" if has_gif else "disabled"))
         has_template = self.template_path is not None and self.template_path.exists()
-        self._menu.entryconfigure(3, state=("normal" if has_template else "disabled"))
         self._menu.entryconfigure(4, state=("normal" if has_template else "disabled"))
+        self._menu.entryconfigure(5, state=("normal" if has_template else "disabled"))
         try:
             self._menu.tk_popup(evt.x_root, evt.y_root)
         finally:
@@ -1053,12 +1127,163 @@ class GroupWindow:
             return
         self.remove_item_at(self._selected_idx)
 
+    def _clear_overlay_items(self) -> None:
+        self.canvas.delete("selection_overlay")
+        self.canvas.delete("drag_overlay")
+        self.canvas.delete("select_overlay")
+
+    def _redraw_overlays(self) -> None:
+        self._clear_overlay_items()
+        for idx, (x0, y0, x1, y1) in enumerate(self._layout_rects):
+            if idx in self._selected_indexes:
+                self.canvas.create_rectangle(
+                    x0 + 2,
+                    y0 + 2,
+                    x1 - 2,
+                    y1 - 2,
+                    outline="#f7c948",
+                    width=3,
+                    tags=("selection_overlay",),
+                )
+            elif self._selected_idx == idx:
+                self.canvas.create_rectangle(
+                    x0 + 2,
+                    y0 + 2,
+                    x1 - 2,
+                    y1 - 2,
+                    outline="#4cc9f0",
+                    width=2,
+                    tags=("selection_overlay",),
+                )
+
+        if self._drag_active and self._drag_target_idx is not None:
+            tidx = self._drag_target_idx
+            if 0 <= tidx < len(self._layout_rects):
+                x0, y0, x1, y1 = self._layout_rects[tidx]
+                self.canvas.create_rectangle(
+                    x0 + 2, y0 + 2, x1 - 2, y1 - 2, outline="#4cc9f0", width=3, tags=("drag_overlay",)
+                )
+        if self._select_box_active and self._select_box_start and self._select_box_current:
+            x0, y0 = self._select_box_start
+            x1, y1 = self._select_box_current
+            self.canvas.create_rectangle(
+                x0,
+                y0,
+                x1,
+                y1,
+                outline="#f7c948",
+                width=2,
+                dash=(6, 4),
+                tags=("select_overlay",),
+            )
+
+    def _render_static_batch(self, rects: list[tuple[int, int, int, int]], token: int, start: int, batch: int = 8) -> None:
+        if token != self._static_render_token:
+            return
+        end = min(len(self.items), start + batch)
+        for idx in range(start, end):
+            item = self.items[idx]
+            x0, y0, x1, y1 = rects[idx]
+            cell_w = max(1, x1 - x0)
+            cell_h = max(1, y1 - y0)
+
+            frame_idx = -1
+            frame = item.pil_image
+            if item.is_gif and item.gif_frames:
+                frame_idx = item.gif_index
+                frame = item.gif_frames[item.gif_index]
+
+            scale = min(cell_w / item.width, cell_h / item.height)
+            draw_w = max(1, int(item.width * scale))
+            draw_h = max(1, int(item.height * scale))
+            self._slot_draw_sizes[idx] = (draw_w, draw_h)
+
+            tk_img = self._photo_for(item, frame_idx, frame, draw_w, draw_h)
+            self._image_refs[idx] = tk_img
+
+            cx = x0 + cell_w // 2
+            cy = y0 + cell_h // 2
+            image_id = self.canvas.create_image(cx, cy, image=tk_img)
+            self._slot_image_ids[idx] = image_id
+
+        self._redraw_overlays()
+        if end < len(self.items):
+            self._render_batch_after_id = self.top.after(1, lambda: self._render_static_batch(rects, token, end, batch))
+        else:
+            self._render_batch_after_id = None
+
+    def _compute_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        if self.smart_layout:
+            if self.layout_algorithm == "justified":
+                rects = self._justified_layout_rects(total_w, total_h)
+            else:
+                rects = self._smart_layout_rects(total_w, total_h)
+            self._layout_rows = max(1, self.rows)
+            self._layout_cols = max(1, math.ceil(len(self.items) / max(1, self.rows)))
+            self._cell_w = max(1, total_w // max(1, self._layout_cols))
+            self._cell_h = max(1, total_h // max(1, self._layout_rows))
+            return rects
+
+        rows, cols, cell_w, cell_h = self._compute_grid(total_w, total_h)
+        self._layout_rows = rows
+        self._layout_cols = cols
+        self._cell_w = cell_w
+        self._cell_h = cell_h
+        rects = []
+        for idx in range(len(self.items)):
+            row = idx // cols
+            col = idx % cols
+            x0 = col * cell_w
+            y0 = row * cell_h
+            x1 = x0 + cell_w
+            y1 = y0 + cell_h
+            rects.append((x0, y0, x1, y1))
+        return rects
+
+    def _draw_static_layout_in_place(self, total_w: int, total_h: int) -> None:
+        if self._render_batch_after_id:
+            try:
+                self.top.after_cancel(self._render_batch_after_id)
+            except Exception:
+                pass
+            self._render_batch_after_id = None
+        self._static_render_token += 1
+        token = self._static_render_token
+
+        rects = self._compute_layout_rects(total_w, total_h)
+        if len(rects) != len(self.items):
+            self._draw_static_layout(total_w, total_h)
+            return
+
+        self._layout_rects = list(rects)
+        self._cell_lookup_rects = list(rects)
+        self._slot_draw_sizes = [(0, 0)] * len(self.items)
+        self._image_refs = [None] * len(self.items)
+
+        for idx, (x0, y0, x1, y1) in enumerate(rects):
+            frame_id = self._slot_frame_ids[idx] if idx < len(self._slot_frame_ids) else 0
+            if frame_id:
+                self.canvas.coords(frame_id, x0, y0, x1, y1)
+
+        self._redraw_overlays()
+        self._render_static_batch(rects, token, 0, batch=12)
+
     def _draw_static_layout(self, total_w: int, total_h: int) -> None:
+        if self._render_batch_after_id:
+            try:
+                self.top.after_cancel(self._render_batch_after_id)
+            except Exception:
+                pass
+            self._render_batch_after_id = None
+        self._static_render_token += 1
+        token = self._static_render_token
+
         self.canvas.delete("all")
         self._image_refs.clear()
         self._layout_rects.clear()
         self._cell_lookup_rects.clear()
         self._slot_image_ids.clear()
+        self._slot_frame_ids.clear()
         self._slot_draw_sizes.clear()
 
         if not self.items:
@@ -1072,102 +1297,25 @@ class GroupWindow:
             )
             return
 
-        if self.smart_layout:
-            if self.layout_algorithm == "justified":
-                rects = self._justified_layout_rects(total_w, total_h)
-            else:
-                rects = self._smart_layout_rects(total_w, total_h)
-            self._layout_rows = max(1, self.rows)
-            self._layout_cols = max(1, math.ceil(len(self.items) / max(1, self.rows)))
-            self._cell_w = max(1, total_w // max(1, self._layout_cols))
-            self._cell_h = max(1, total_h // max(1, self._layout_rows))
-        else:
-            rows, cols, cell_w, cell_h = self._compute_grid(total_w, total_h)
-            self._layout_rows = rows
-            self._layout_cols = cols
-            self._cell_w = cell_w
-            self._cell_h = cell_h
-            rects = []
-            for idx in range(len(self.items)):
-                row = idx // cols
-                col = idx % cols
-                x0 = col * cell_w
-                y0 = row * cell_h
-                x1 = x0 + cell_w
-                y1 = y0 + cell_h
-                rects.append((x0, y0, x1, y1))
+        rects = self._compute_layout_rects(total_w, total_h)
 
-        for idx, item in enumerate(self.items):
-            x0, y0, x1, y1 = rects[idx]
-            cell_w = max(1, x1 - x0)
-            cell_h = max(1, y1 - y0)
+        self._image_refs = [None] * len(self.items)
+        self._slot_image_ids = [0] * len(self.items)
+        self._slot_frame_ids = [0] * len(self.items)
+        self._slot_draw_sizes = [(0, 0)] * len(self.items)
+
+        for idx, (x0, y0, x1, y1) in enumerate(rects):
             self._layout_rects.append((x0, y0, x1, y1))
             self._cell_lookup_rects.append((x0, y0, x1, y1))
+            self._slot_frame_ids[idx] = self.canvas.create_rectangle(x0, y0, x1, y1, outline="#1f1f1f")
 
-            frame_idx = -1
-            frame = item.pil_image
-            if item.is_gif and item.gif_frames:
-                frame_idx = item.gif_index
-                frame = item.gif_frames[item.gif_index]
-
-            scale = min(cell_w / item.width, cell_h / item.height)
-            draw_w = max(1, int(item.width * scale))
-            draw_h = max(1, int(item.height * scale))
-
-            tk_img = self._photo_for(item, frame_idx, frame, draw_w, draw_h)
-            self._image_refs.append(tk_img)
-            self._slot_draw_sizes.append((draw_w, draw_h))
-
-            cx = x0 + cell_w // 2
-            cy = y0 + cell_h // 2
-            self.canvas.create_rectangle(x0, y0, x1, y1, outline="#1f1f1f")
-            image_id = self.canvas.create_image(cx, cy, image=tk_img)
-            self._slot_image_ids.append(image_id)
-
-            if idx in self._selected_indexes:
-                self.canvas.create_rectangle(
-                    x0 + 2,
-                    y0 + 2,
-                    x1 - 2,
-                    y1 - 2,
-                    outline="#f7c948",
-                    width=3,
-                )
-            elif self._selected_idx == idx:
-                self.canvas.create_rectangle(
-                    x0 + 2,
-                    y0 + 2,
-                    x1 - 2,
-                    y1 - 2,
-                    outline="#4cc9f0",
-                    width=2,
-                )
-
-        if self._drag_active and self._drag_target_idx is not None:
-            tidx = self._drag_target_idx
-            if 0 <= tidx < len(self._layout_rects):
-                x0, y0, x1, y1 = self._layout_rects[tidx]
-                self.canvas.create_rectangle(
-                    x0 + 2, y0 + 2, x1 - 2, y1 - 2, outline="#4cc9f0", width=3
-                )
-        if self._select_box_active and self._select_box_start and self._select_box_current:
-            x0, y0 = self._select_box_start
-            x1, y1 = self._select_box_current
-            self.canvas.create_rectangle(
-                x0,
-                y0,
-                x1,
-                y1,
-                outline="#f7c948",
-                width=2,
-                dash=(6, 4),
-            )
+        self._redraw_overlays()
+        self._render_static_batch(rects, token, 0, batch=10)
 
     def _refresh_gif_slots(self, changed_indexes: list[int]) -> None:
         if not changed_indexes:
             return
         if len(self._slot_image_ids) != len(self.items):
-            self.render(force=True)
             return
 
         for idx in changed_indexes:
@@ -1178,23 +1326,32 @@ class GroupWindow:
                 continue
 
             draw_w, draw_h = self._slot_draw_sizes[idx]
+            image_id = self._slot_image_ids[idx]
+            if draw_w <= 0 or draw_h <= 0 or not image_id:
+                continue
             frame_idx = item.gif_index
             frame = item.gif_frames[frame_idx]
             tk_img = self._photo_for(item, frame_idx, frame, draw_w, draw_h)
             self._image_refs[idx] = tk_img
-            self.canvas.itemconfigure(self._slot_image_ids[idx], image=tk_img)
+            self.canvas.itemconfigure(image_id, image=tk_img)
 
     def render(self, force: bool = False) -> None:
         total_w = self.canvas.winfo_width()
         total_h = self.canvas.winfo_height()
         if total_w <= 1 or total_h <= 1:
             return
+        if time.time() < self._resizing_until:
+            return
 
         size_changed = (total_w, total_h) != self._last_layout_size
         if not force and not size_changed:
             return
 
+        same_count = len(self._slot_image_ids) == len(self.items) == len(self._slot_frame_ids) and bool(self.items)
         self._last_layout_size = (total_w, total_h)
+        if force and not size_changed and same_count:
+            self._draw_static_layout_in_place(total_w, total_h)
+            return
         self._draw_static_layout(total_w, total_h)
 
     def _advance_gif_to_now(self, item: ImageItem, now: float) -> bool:
@@ -1261,6 +1418,8 @@ class PicReadApp:
         self._dirty = False
         self._last_save_ts = 0.0
         self._suspend_dirty = False
+        self._interaction_pause_until = 0.0
+        self._modal_dialog_depth = 0
         self._ui_state = self._load_ui_state()
         self.language_code = str(self._ui_state.get("language", "zh_CN"))
         if self.language_code not in LANGUAGE_OPTIONS:
@@ -1649,6 +1808,7 @@ class PicReadApp:
         self.template_selected_idx: Optional[int] = None
         self.template_thumbs: list[ImageTk.PhotoImage] = []
         self.template_icon_cells: list[tuple[int, int, int, int]] = []
+        self.template_icon_outline_ids: list[int] = []
         self._template_render_after_id: Optional[str] = None
         self.template_context_var = tk.StringVar(value=self.tr("template.context_none", "当前目标组：未选择"))
         ttk.Label(templates_tab, textvariable=self.template_context_var).pack(anchor="w", pady=(8, 2))
@@ -1970,12 +2130,26 @@ class PicReadApp:
     def _decode_drop_item(self, item) -> str:
         if isinstance(item, (bytes, bytearray)):
             raw = bytes(item)
-            for enc in ("utf-8", "gb18030", "gbk", "mbcs"):
+            if not raw:
+                return ""
+            candidates: list[str] = []
+            if b"\x00" in raw:
+                candidates.extend(["utf-16-le", "utf-16-be"])
+            fsenc = sys.getfilesystemencoding() or "utf-8"
+            preferred = locale.getpreferredencoding(False) or ""
+            for enc in (fsenc, preferred, "utf-8-sig", "utf-8", "gb18030", "gbk", "cp932", "shift_jis", "mbcs"):
+                if not enc or enc in candidates:
+                    continue
+                candidates.append(enc)
+            for enc in candidates:
                 try:
-                    return raw.decode(enc)
+                    return raw.decode(enc).replace("\x00", "")
                 except Exception:
                     continue
-            return raw.decode(errors="ignore")
+            try:
+                return os.fsdecode(raw).replace("\x00", "")
+            except Exception:
+                return raw.decode(fsenc, errors="surrogateescape").replace("\x00", "")
         return str(item)
 
     def _normalize_drop_text(self, text: str) -> str:
@@ -2084,9 +2258,49 @@ class PicReadApp:
         gid = self._group_order[list_idx]
         return self.groups.get(gid)
 
+    def pause_heavy_work(self, seconds: float = 0.6) -> None:
+        self._interaction_pause_until = max(self._interaction_pause_until, time.time() + max(0.0, seconds))
+
+    def _begin_modal_block(self) -> None:
+        self._modal_dialog_depth += 1
+        self.pause_heavy_work(10.0)
+
+    def _end_modal_block(self) -> None:
+        if self._modal_dialog_depth > 0:
+            self._modal_dialog_depth -= 1
+        if self._modal_dialog_depth <= 0:
+            self._modal_dialog_depth = 0
+            self.pause_heavy_work(0.8)
+
+    def heavy_work_paused(self) -> bool:
+        return self._modal_dialog_depth > 0 or time.time() < self._interaction_pause_until
+
     def _safe_template_filename(self, name: str) -> str:
         clean = re.sub(r"[^\w\-\u4e00-\u9fff]+", "_", name.strip())
         return (clean or "template") + ".json"
+
+    def _dialog_parent(self, group: Optional[GroupWindow] = None) -> tk.Misc:
+        if group is not None:
+            try:
+                if group.top.winfo_exists():
+                    return group.top
+            except Exception:
+                pass
+        return self.root
+
+    def _show_dialog_window(self, win: tk.Toplevel, parent: tk.Misc) -> None:
+        win.transient(parent)
+        win.update_idletasks()
+        win.lift()
+        try:
+            win.attributes("-topmost", True)
+            win.after(120, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+        except Exception:
+            pass
+        try:
+            win.focus_force()
+        except Exception:
+            pass
 
     def _template_display_name(self, data: dict, fallback_stem: str) -> str:
         raw = str(data.get("template_name", data.get("name", fallback_stem))).strip()
@@ -2506,8 +2720,9 @@ class PicReadApp:
         sel = self.template_list.curselection()
         if not sel:
             return
+        self.pause_heavy_work(0.8)
         self.template_selected_idx = sel[0]
-        self._render_template_icons()
+        self._update_template_icon_selection_visuals()
 
     def _render_template_icons(self) -> None:
         if not hasattr(self, "template_canvas"):
@@ -2515,6 +2730,7 @@ class PicReadApp:
         c = self.template_canvas
         c.delete("all")
         self.template_icon_cells.clear()
+        self.template_icon_outline_ids.clear()
         self.template_thumbs.clear()
         self._thumb_render_token += 1
         token = self._thumb_render_token
@@ -2536,7 +2752,8 @@ class PicReadApp:
             self.template_icon_cells.append((x0, y0, x1, y1))
 
             outline = "#4cc9f0" if idx == self.template_selected_idx else "#2c2c2c"
-            c.create_rectangle(x0, y0, x1, y1, outline=outline, width=2)
+            outline_id = c.create_rectangle(x0, y0, x1, y1, outline=outline, width=2)
+            self.template_icon_outline_ids.append(outline_id)
 
             preview = ent["preview"]
             if preview and Path(preview).is_file():
@@ -2626,16 +2843,29 @@ class PicReadApp:
         if end < len(tasks):
             self.root.after(1, lambda: self._render_thumb_batch(tasks, token, end, batch))
 
+    def _update_template_icon_selection_visuals(self) -> None:
+        if not hasattr(self, "template_canvas"):
+            return
+        if len(self.template_icon_outline_ids) != len(self.template_entries):
+            return
+        for idx, item_id in enumerate(self.template_icon_outline_ids):
+            outline = "#4cc9f0" if idx == self.template_selected_idx else "#2c2c2c"
+            try:
+                self.template_canvas.itemconfigure(item_id, outline=outline)
+            except Exception:
+                pass
+
     def _on_template_icon_click(self, evt: tk.Event) -> None:
         x = self.template_canvas.canvasx(evt.x)
         y = self.template_canvas.canvasy(evt.y)
         for idx, (x0, y0, x1, y1) in enumerate(self.template_icon_cells):
             if x0 <= x <= x1 and y0 <= y <= y1:
+                self.pause_heavy_work(0.8)
                 self.template_selected_idx = idx
                 self.template_list.selection_clear(0, tk.END)
                 self.template_list.selection_set(idx)
                 self.template_list.see(idx)
-                self._render_template_icons()
+                self._update_template_icon_selection_visuals()
                 return
 
     def _selected_template_entry(self) -> Optional[dict]:
@@ -2747,12 +2977,16 @@ class PicReadApp:
         title: str,
         default_name: str,
         default_tags: Optional[list[str]] = None,
+        parent: Optional[tk.Misc] = None,
     ) -> Optional[tuple[str, list[str]]]:
         result: dict[str, Optional[tuple[str, list[str]]]] = {"value": None}
-        win = tk.Toplevel(self.root)
+        self._begin_modal_block()
+        self.root.update_idletasks()
+        dialog_parent = parent or self.root
+        win = tk.Toplevel(dialog_parent)
         self.apply_window_icon(win)
         win.title(title)
-        win.transient(self.root)
+        self._show_dialog_window(win, dialog_parent)
         win.grab_set()
 
         body = ttk.Frame(win, padding=16)
@@ -2793,7 +3027,10 @@ class PicReadApp:
         name_entry.focus_set()
         name_entry.selection_range(0, tk.END)
         win.bind("<Return>", lambda _e: _confirm())
-        self.root.wait_window(win)
+        try:
+            self.root.wait_window(win)
+        finally:
+            self._end_modal_block()
         return result["value"]
 
     def _create_group(
@@ -2964,9 +3201,11 @@ class PicReadApp:
             self._refresh_list()
 
     def save_group_template(self, group: Optional[GroupWindow] = None) -> None:
+        self.pause_heavy_work(1.5)
         g = group or self._selected_group()
+        dialog_parent = self._dialog_parent(g)
         if not g:
-            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_first", "请先选择一个窗口组。"))
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_first", "请先选择一个窗口组。"), parent=dialog_parent)
             return
 
         default_name = g.name
@@ -2978,7 +3217,7 @@ class PicReadApp:
             except Exception:
                 existing_tags = []
 
-        meta = self._prompt_template_meta(self.tr("dialog.save_template", "保存模板"), default_name, existing_tags)
+        meta = self._prompt_template_meta(self.tr("dialog.save_template", "保存模板"), default_name, existing_tags, parent=dialog_parent)
         if not meta:
             return
         name, tags = meta
@@ -2989,15 +3228,15 @@ class PicReadApp:
         file_path = TEMPLATE_DIR / self._safe_template_filename(name)
         current_path = g.template_path.resolve() if g.template_path and g.template_path.exists() else None
         if file_path.exists() and file_path.resolve() != current_path:
-            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.template_name_exists", "同名模板已存在，请换一个模板名称。"))
+            messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.template_name_exists", "同名模板已存在，请换一个模板名称。"), parent=dialog_parent)
             return
         try:
             file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             g.template_path = file_path
             self.refresh_template_library()
-            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_saved", "模板已保存:\n{name}", name=file_path.name))
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_saved", "模板已保存:\n{name}", name=file_path.name), parent=dialog_parent)
         except Exception as exc:
-            messagebox.showerror(self.tr("msg.save_failed", "保存失败"), str(exc))
+            messagebox.showerror(self.tr("msg.save_failed", "保存失败"), str(exc), parent=dialog_parent)
 
     def persist_template_geometry(self, g: GroupWindow) -> None:
         if g.suppress_template_geometry_persist:
@@ -3008,6 +3247,7 @@ class PicReadApp:
         self._template_geometry_map[key] = g.top.geometry()
 
     def load_group_template(self) -> None:
+        self.pause_heavy_work(1.2)
         ent = self._selected_template_entry()
         if ent is None:
             self.refresh_template_library()
@@ -3038,12 +3278,14 @@ class PicReadApp:
         )
 
     def update_linked_template(self, group: Optional[GroupWindow] = None) -> None:
+        self.pause_heavy_work(1.2)
         g = group or self._selected_group()
+        dialog_parent = self._dialog_parent(g)
         if g is None:
-            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_first", "请先选择一个目标窗口组。"))
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_first", "请先选择一个目标窗口组。"), parent=dialog_parent)
             return
         if not g.template_path:
-            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.group_not_linked_template", "当前组没有关联模板，请先“保存为模板”。"))
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.group_not_linked_template", "当前组没有关联模板，请先“保存为模板”。"), parent=dialog_parent)
             return
 
         current_template_name = g.template_path.stem
@@ -3060,11 +3302,12 @@ class PicReadApp:
         try:
             g.template_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             self.refresh_template_library()
-            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_updated", "已更新模板: {name}", name=g.template_path.name))
+            messagebox.showinfo(self.tr("msg.done", "完成"), self.tr("msg.template_updated", "已更新模板: {name}", name=g.template_path.name), parent=dialog_parent)
         except Exception as exc:
-            messagebox.showerror(self.tr("msg.update_failed", "更新失败"), str(exc))
+            messagebox.showerror(self.tr("msg.update_failed", "更新失败"), str(exc), parent=dialog_parent)
 
     def reload_linked_template(self, group: Optional[GroupWindow] = None) -> None:
+        self.pause_heavy_work(1.2)
         g = group or self._selected_group()
         if g is None:
             messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_target_group_first", "请先选择一个目标窗口组。"))
@@ -3094,6 +3337,7 @@ class PicReadApp:
         self._refresh_list(select_gid=g.group_id)
 
     def rename_selected_template(self) -> None:
+        self.pause_heavy_work(1.2)
         ent = self._selected_template_entry()
         if ent is None:
             messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
@@ -3145,6 +3389,7 @@ class PicReadApp:
         return out
 
     def edit_selected_template_tags(self) -> None:
+        self.pause_heavy_work(1.2)
         ent = self._selected_template_entry()
         if ent is None:
             messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
@@ -3168,6 +3413,7 @@ class PicReadApp:
             messagebox.showerror(self.tr("msg.tag_update_failed", "标签更新失败"), str(exc))
 
     def delete_selected_template(self) -> None:
+        self.pause_heavy_work(1.2)
         ent = self._selected_template_entry()
         if ent is None:
             messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_template_first", "请先在模板库中选择一个模板。"))
@@ -3411,21 +3657,22 @@ class PicReadApp:
         now = time.time()
         profile = self.current_profile()
         updated_total = 0
-        groups_with_gifs = [(g, g.gif_item_count()) for g in list(self.groups.values())]
-        groups_with_gifs = [(g, gif_count) for g, gif_count in groups_with_gifs if gif_count > 0]
-        remaining_budget = int(profile["frame_budget"])
-        remaining_weight = sum(gif_count for _, gif_count in groups_with_gifs)
-        for idx, (g, gif_count) in enumerate(groups_with_gifs):
-            if remaining_budget <= 0 or remaining_weight <= 0:
-                break
-            if idx == len(groups_with_gifs) - 1:
-                allocation = remaining_budget
-            else:
-                allocation = max(1, int(round(remaining_budget * gif_count / remaining_weight)))
-            used = g.tick_gif(now, frame_budget=allocation)
-            updated_total += used
-            remaining_budget -= used
-            remaining_weight -= gif_count
+        if not self.heavy_work_paused():
+            groups_with_gifs = [(g, g.gif_item_count()) for g in list(self.groups.values())]
+            groups_with_gifs = [(g, gif_count) for g, gif_count in groups_with_gifs if gif_count > 0]
+            remaining_budget = int(profile["frame_budget"])
+            remaining_weight = sum(gif_count for _, gif_count in groups_with_gifs)
+            for idx, (g, gif_count) in enumerate(groups_with_gifs):
+                if remaining_budget <= 0 or remaining_weight <= 0:
+                    break
+                if idx == len(groups_with_gifs) - 1:
+                    allocation = remaining_budget
+                else:
+                    allocation = max(1, int(round(remaining_budget * gif_count / remaining_weight)))
+                used = g.tick_gif(now, frame_budget=allocation)
+                updated_total += used
+                remaining_budget -= used
+                remaining_weight -= gif_count
         self._last_tick_updated = updated_total
         self._update_status(updated_total, now)
 
