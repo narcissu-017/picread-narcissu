@@ -11,7 +11,10 @@ build/
 
 # Runtime / local state
 state/
+dist/state/
 *.log
+test_outputs/
+backups/
 
 # IDE / OS
 .vscode/

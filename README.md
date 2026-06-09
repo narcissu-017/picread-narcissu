@@ -4,6 +4,8 @@
 
 PicRead is a multi-window tiling viewer for reviewing large numbers of images and GIFs.
 
+Current version: `v0.88`
+
 It works especially well when you want to:
 - compare many images or GIFs at once
 - make better use of a large monitor without wasting too much desktop space
@@ -36,6 +38,14 @@ It works especially well when you want to:
 - Improved template save/update dialog behavior to reduce cases where a hidden dialog could make the app look stuck.
 - Clicking an already selected image now clears the selection highlight immediately.
 - The image-window context menu now includes a restart action for replaying every GIF in the current window from the beginning.
+
+## **2026-06-09 · Version 0.88**
+- Added Algorithm 3 for improved mixed landscape, portrait, and square image layouts.
+- Added a batch import order option so dragged-in files can be kept in normal order or reversed when needed.
+- Improved layout refresh behavior after switching algorithms on an already opened group or template.
+- Improved responsiveness while many GIFs are building cache during window move, resize, and item reordering.
+- Split static image and thumbnail rendering into smaller batches to reduce UI stalls under heavy workloads.
+- Existing templates, history, and sessions remain compatible and are not automatically cleaned or migrated away.
 
 ## Download and Use
 A ready-to-run build is included in this repository:

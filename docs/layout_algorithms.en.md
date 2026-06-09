@@ -1,6 +1,6 @@
 # Layout Algorithm Notes
 
-This document describes the two main tiling algorithms used in the current public release of PicRead.
+This document describes the three main tiling algorithms used in the current public release of PicRead.
 
 ## Design Goals
 These layout strategies are designed for reviewing images and GIFs rather than for building a generic photo gallery.
@@ -118,4 +118,48 @@ total_cost = dp[count] * 0.35 + blank_ratio * 3.8 + overflow_ratio * 2.4 + short
 
 ## Practical Trade-Offs
 As long as the layout must preserve order, preserve aspect ratio, and avoid cropping, empty space can never be reduced to absolute zero in every case.
-The goal of these two algorithms is not to eliminate all blank areas, but to steer them into a more natural and review-friendly balance.
+The goal of these algorithms is not to eliminate all blank areas, but to steer them into a more natural and review-friendly balance.
+
+## Algorithm 3: Review-Size Balanced Layout
+Algorithm 3 focuses on review comfort when landscape, portrait, and square images are mixed together.
+Instead of forcing every item into rows with the same height, it builds several candidate layouts and chooses the best one with a shared quality score.
+
+The main pain point it addresses is that portrait images can become too narrow and too small when they are forced into the same row height as nearby landscape images.
+
+Core ideas:
+1. Preserve the original item order.
+2. Generate different candidate rectangles for landscape, portrait, and square images.
+3. When a landscape item and a portrait item are adjacent, try grouping them into one review unit so the portrait item can receive more height.
+4. Score candidates using short-side readability, area usage, empty space, overflow, and size consistency.
+5. Choose the result that best balances screen usage and readable image size.
+
+Landscape/portrait pairing snippet:
+```python
+if is_landscape and next_portrait:
+    portrait_w = min(0.95, max(0.34, next_ratio))
+    land_h = portrait_w
+    land_w = max(0.35, ratio * land_h)
+    unit_w = land_w + portrait_w
+    units.append({
+        "ratio": unit_w,
+        "parts": [
+            (idx, 0.0, 0.0, land_w, land_h),
+            (idx + 1, land_w, 0.0, unit_w, 1.0),
+        ],
+    })
+```
+
+Candidate layouts are evaluated through a shared score:
+```python
+slot_mosaic_candidate = self._slot_mosaic_layout_rects(total_w, total_h)
+orientation_candidate = self._orientation_mosaic_layout_rects(total_w, total_h)
+short_side_candidate = self._short_side_balanced_layout_rects(total_w, total_h)
+area_candidate = self._area_balanced_layout_rects(total_w, total_h)
+
+best = max(candidates, key=lambda rects: self._layout_quality_score(rects, total_w, total_h))
+```
+
+### Best Use Cases
+- Mixed landscape, portrait, and square images
+- Portrait images feel too small in Algorithm 1 or Algorithm 2
+- Review readability matters more than perfectly uniform row heights

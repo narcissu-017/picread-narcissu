@@ -27,7 +27,7 @@ try:
 except Exception:
     windnd = None
 
-APP_VERSION = "0.87"
+APP_VERSION = "0.88"
 SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -104,6 +104,7 @@ DEFAULT_PERF_MODES = deepcopy(PERF_MODES)
 LAYOUT_ALGORITHMS = {
     "legacy": "算法1",
     "justified": "算法2",
+    "balanced": "算法3",
 }
 RESAMPLE_NAME_TO_VALUE = {
     "LANCZOS": Image.Resampling.LANCZOS,
@@ -114,6 +115,10 @@ RESAMPLE_VALUE_TO_NAME = {v: k for k, v in RESAMPLE_NAME_TO_VALUE.items()}
 LANGUAGE_OPTIONS = {
     "zh_CN": "简体中文",
     "en_US": "English",
+}
+BATCH_ORDER_OPTIONS = {
+    "normal": "正序",
+    "reverse": "倒序",
 }
 
 
@@ -497,10 +502,14 @@ class GroupWindow:
         self._menu.entryconfigure(5, label=self.app.tr("button.reload_template", "重新加载模板"))
 
     def set_layout(self, rows: int, smart_layout: bool, layout_algorithm: Optional[str] = None) -> None:
+        old_layout = (self.rows, self.smart_layout, self.layout_algorithm)
         self.rows = max(1, rows)
         self.smart_layout = smart_layout
         if layout_algorithm:
             self.layout_algorithm = layout_algorithm if layout_algorithm in LAYOUT_ALGORITHMS else "legacy"
+        if old_layout != (self.rows, self.smart_layout, self.layout_algorithm):
+            self._last_layout_size = (0, 0)
+            self._photo_cache.clear()
         self.app.mark_dirty()
         self.render(force=True)
 
@@ -888,6 +897,770 @@ class GroupWindow:
 
         return rects[:count]
 
+    def _layout_quality_score(self, rects: list[tuple[int, int, int, int]], total_w: int, total_h: int) -> float:
+        if len(rects) != len(self.items) or not self.items:
+            return -1_000_000.0
+
+        image_area = 0.0
+        draw_heights: list[float] = []
+        draw_areas: list[float] = []
+        draw_short_sides: list[float] = []
+        for item, (x0, y0, x1, y1) in zip(self.items, rects):
+            cell_w = max(1, x1 - x0)
+            cell_h = max(1, y1 - y0)
+            scale = min(cell_w / item.width, cell_h / item.height)
+            draw_w = max(1.0, item.width * scale)
+            draw_h = max(1.0, item.height * scale)
+            image_area += draw_w * draw_h
+            draw_heights.append(draw_h)
+            draw_areas.append(draw_w * draw_h)
+            draw_short_sides.append(min(draw_w, draw_h))
+
+        coverage = image_area / max(1.0, total_w * total_h)
+        used_bottom = max((y1 for _, _, _, y1 in rects), default=0)
+        bottom_blank = max(0.0, total_h - used_bottom) / max(1.0, total_h)
+        min_h = min(draw_heights)
+        max_h = max(draw_heights)
+        area_ratio = max(draw_areas) / max(1.0, min(draw_areas))
+        ideal_area = max(1.0, (total_w * total_h) / max(1, len(self.items)))
+        readable_area = ideal_area * 0.30
+        readable_short_side = max(58.0, min(124.0, math.sqrt(ideal_area) * 0.55))
+        too_small = sum(1 for area in draw_areas if area < readable_area)
+        severe_too_narrow = sum(1 for side in draw_short_sides if side < readable_short_side * 0.84)
+        area_deficit = sum(max(0.0, (readable_area - area) / readable_area) ** 2 for area in draw_areas)
+        short_deficit = sum(
+            max(0.0, (readable_short_side - side) / readable_short_side) for side in draw_short_sides
+        )
+        too_large = sum(1 for h in draw_heights if h > total_h * 0.62)
+        height_ratio = max_h / max(1.0, min_h)
+
+        score = coverage * 3.0
+        score -= bottom_blank * 1.4
+        score -= too_small * 0.25
+        score -= severe_too_narrow * 0.55
+        score -= area_deficit * 0.35
+        score -= short_deficit * 2.4
+        score -= too_large * 0.35
+        score -= max(0.0, height_ratio - 3.2) * 0.18
+        score -= max(0.0, area_ratio - 12.0) * 0.025
+        return score
+
+    def _balanced_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        count = len(self.items)
+        if count <= 0:
+            return []
+
+        ratios = [max(0.05, item.width / max(1, item.height)) for item in self.items]
+        prefix_ratio = [0.0]
+        for ratio in ratios:
+            prefix_ratio.append(prefix_ratio[-1] + ratio)
+
+        min_row_h = max(88.0, min(150.0, total_h * 0.12))
+        preferred_min_h = max(112.0, min(180.0, total_h * 0.17))
+        preferred_max_h = max(preferred_min_h + 26.0, min(330.0, total_h * 0.42))
+        hard_max_h = max(preferred_max_h + 40.0, min(520.0, total_h * 0.72))
+        max_items_per_row = min(count, 8)
+        max_rows = min(count, max(1, int(math.ceil(total_h / max(1.0, min_row_h))) + 5))
+        ideal_area = max(1.0, (total_w * total_h) / max(1, count))
+        readable_area = ideal_area * 0.30
+        readable_short_side = max(58.0, min(124.0, math.sqrt(ideal_area) * 0.55))
+
+        best_cost = float("inf")
+        best_partitions: list[tuple[int, int]] = []
+        best_heights: list[float] = []
+
+        for row_count in range(1, max_rows + 1):
+            target_h = total_h / row_count
+            dp = [[float("inf")] * (count + 1) for _ in range(row_count + 1)]
+            prev = [[-1] * (count + 1) for _ in range(row_count + 1)]
+            row_height_at = [[0.0] * (count + 1) for _ in range(row_count + 1)]
+            dp[0][0] = 0.0
+
+            for row in range(1, row_count + 1):
+                remaining_rows = row_count - row
+                end_min = row
+                end_max = count - remaining_rows
+                for end in range(end_min, end_max + 1):
+                    start_min = max(row - 1, end - max_items_per_row)
+                    start_max = end - 1
+                    for start in range(start_min, start_max + 1):
+                        prior = dp[row - 1][start]
+                        if prior == float("inf"):
+                            continue
+                        ratio_sum = prefix_ratio[end] - prefix_ratio[start]
+                        if ratio_sum <= 0:
+                            continue
+                        row_h = total_w / ratio_sum
+                        if row_h < min_row_h * 0.74:
+                            continue
+                        items_in_row = end - start
+
+                        cost = ((row_h - target_h) / max(1.0, target_h)) ** 2
+                        if row_h < preferred_min_h:
+                            cost += ((preferred_min_h - row_h) / preferred_min_h) ** 2 * 4.6
+                        if row_h > preferred_max_h:
+                            cost += ((row_h - preferred_max_h) / preferred_max_h) ** 2 * 2.8
+                        if row_h < min_row_h:
+                            cost += ((min_row_h - row_h) / min_row_h) ** 2 * 24.0
+                        if row_h > hard_max_h:
+                            cost += ((row_h - hard_max_h) / hard_max_h) ** 2 * 4.4
+                        for ratio in ratios[start:end]:
+                            draw_area = max(1.0, ratio * row_h * row_h)
+                            short_side = min(row_h, row_h * ratio)
+                            if draw_area < readable_area:
+                                cost += ((readable_area - draw_area) / readable_area) ** 2 * 0.45
+                            if short_side < readable_short_side:
+                                cost += ((readable_short_side - short_side) / readable_short_side) ** 2 * 2.2
+                        if items_in_row == 1 and count > 3:
+                            cost += 0.95
+                        if items_in_row >= 9:
+                            cost += (items_in_row - 8) * 0.18
+
+                        total_cost = prior + cost
+                        if total_cost < dp[row][end]:
+                            dp[row][end] = total_cost
+                            prev[row][end] = start
+                            row_height_at[row][end] = row_h
+
+            if dp[row_count][count] == float("inf"):
+                continue
+
+            partitions: list[tuple[int, int]] = []
+            heights: list[float] = []
+            end = count
+            row = row_count
+            while row > 0:
+                start = prev[row][end]
+                if start < 0:
+                    partitions = []
+                    break
+                partitions.append((start, end))
+                heights.append(row_height_at[row][end])
+                end = start
+                row -= 1
+            partitions.reverse()
+            heights.reverse()
+            if not partitions:
+                continue
+
+            natural_h = sum(heights)
+            blank_ratio = max(0.0, total_h - natural_h) / max(1.0, total_h)
+            overflow_ratio = max(0.0, natural_h - total_h) / max(1.0, total_h)
+            if overflow_ratio > 0.015:
+                continue
+            avg_h = natural_h / max(1, len(heights))
+            variance = sum(((h - avg_h) / max(1.0, avg_h)) ** 2 for h in heights) / max(1, len(heights))
+            min_h = min(heights)
+            max_h = max(heights)
+            extreme_ratio = max_h / max(1.0, min_h)
+            extreme_penalty = max(0.0, extreme_ratio - 2.2) ** 2 * 0.8
+            total_cost = dp[row_count][count] * 0.34
+            total_cost += blank_ratio * 2.7 + overflow_ratio * 9.0
+            total_cost += abs(natural_h - total_h) / max(1.0, total_h) * 1.3
+            total_cost += variance * 0.9 + extreme_penalty
+
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best_partitions = partitions
+                best_heights = heights
+
+        candidates = [
+            self._smart_layout_rects(total_w, total_h),
+            self._justified_layout_rects(total_w, total_h),
+        ]
+        slot_mosaic_candidate = self._slot_mosaic_layout_rects(total_w, total_h)
+        if slot_mosaic_candidate:
+            candidates.append(slot_mosaic_candidate)
+        mosaic_candidate = self._orientation_mosaic_layout_rects(total_w, total_h)
+        if mosaic_candidate:
+            candidates.append(mosaic_candidate)
+        short_side_candidate = self._short_side_balanced_layout_rects(total_w, total_h)
+        if short_side_candidate:
+            candidates.append(short_side_candidate)
+        area_candidate = self._area_balanced_layout_rects(total_w, total_h)
+        if area_candidate:
+            candidates.append(area_candidate)
+
+        if best_partitions:
+            rects: list[tuple[int, int, int, int]] = []
+            y = 0
+            for row_idx, (start, end) in enumerate(best_partitions):
+                row_h = max(1, int(round(best_heights[row_idx])))
+                row_ratios = ratios[start:end]
+                widths = [max(1, int(round(row_h * ratio))) for ratio in row_ratios]
+                width_fix = total_w - sum(widths)
+                if widths:
+                    widths[-1] = max(1, widths[-1] + width_fix)
+                x = 0
+                for col_idx, draw_w in enumerate(widths):
+                    x0 = x
+                    x1 = total_w if col_idx == len(widths) - 1 else min(total_w, x + max(1, draw_w))
+                    y1 = min(total_h, y + row_h)
+                    rects.append((x0, y, x1, y1))
+                    x = x1
+                y += row_h
+            candidates.append(rects[:count])
+
+        return max(candidates, key=lambda rects: self._layout_quality_score(rects, total_w, total_h))
+
+    def _pack_span_mosaic_rects(
+        self,
+        span_sets: list[tuple[list[tuple[int, int]], float]],
+        total_w: int,
+        total_h: int,
+    ) -> list[tuple[int, int, int, int]]:
+        count = len(self.items)
+        if count <= 0:
+            return []
+
+        best_rects: list[tuple[int, int, int, int]] = []
+        best_score = -1_000_000.0
+
+        for spans, score_bonus in span_sets:
+            if len(spans) != count or all(span == (1, 1) for span in spans):
+                continue
+
+            max_span_w = max(w for w, _ in spans)
+            min_cols = max(max_span_w, 2)
+            max_cols = min(18, max(min_cols, int(math.ceil(math.sqrt(count * 2.4))) + 7))
+
+            for cols in range(min_cols, max_cols + 1):
+                grid: list[list[bool]] = []
+                placements: list[tuple[int, int, int, int]] = []
+
+                def _ensure_rows(row_count: int) -> None:
+                    while len(grid) < row_count:
+                        grid.append([False] * cols)
+
+                def _can_place(row: int, col: int, span_w: int, span_h: int) -> bool:
+                    if col + span_w > cols:
+                        return False
+                    _ensure_rows(row + span_h)
+                    for rr in range(row, row + span_h):
+                        for cc in range(col, col + span_w):
+                            if grid[rr][cc]:
+                                return False
+                    return True
+
+                def _occupy(row: int, col: int, span_w: int, span_h: int) -> None:
+                    _ensure_rows(row + span_h)
+                    for rr in range(row, row + span_h):
+                        for cc in range(col, col + span_w):
+                            grid[rr][cc] = True
+
+                for span_w, span_h in spans:
+                    if span_w > cols:
+                        placements = []
+                        break
+                    placed = False
+                    row = 0
+                    while not placed and row < count * 4 + 8:
+                        for col in range(0, cols - span_w + 1):
+                            if _can_place(row, col, span_w, span_h):
+                                _occupy(row, col, span_w, span_h)
+                                placements.append((col, row, span_w, span_h))
+                                placed = True
+                                break
+                        if not placed:
+                            row += 1
+                    if not placed:
+                        placements = []
+                        break
+
+                if len(placements) != count:
+                    continue
+
+                rows_used = max(row + span_h for _, row, _, span_h in placements)
+                if rows_used <= 0:
+                    continue
+                unit = min(total_w / max(1, cols), total_h / max(1, rows_used))
+                if unit < 24:
+                    continue
+
+                layout_w = unit * cols
+                x_offset = max(0.0, (total_w - layout_w) / 2.0)
+                square_rects: list[tuple[int, int, int, int]] = []
+                for col, row, span_w, span_h in placements:
+                    x0 = int(round(x_offset + col * unit))
+                    y0 = int(round(row * unit))
+                    x1 = int(round(x_offset + (col + span_w) * unit))
+                    y1 = int(round((row + span_h) * unit))
+                    square_rects.append((max(0, x0), max(0, y0), min(total_w, x1), min(total_h, y1)))
+
+                fill_rects: list[tuple[int, int, int, int]] = []
+                unit_w = total_w / max(1, cols)
+                unit_h = total_h / max(1, rows_used)
+                for col, row, span_w, span_h in placements:
+                    x0 = int(round(col * unit_w))
+                    y0 = int(round(row * unit_h))
+                    x1 = int(round((col + span_w) * unit_w))
+                    y1 = int(round((row + span_h) * unit_h))
+                    fill_rects.append((max(0, x0), max(0, y0), min(total_w, x1), min(total_h, y1)))
+
+                for rects, mode_bonus in ((square_rects, 0.0), (fill_rects, 0.12)):
+                    if len(rects) != count:
+                        continue
+                    score = self._layout_quality_score(rects, total_w, total_h) + score_bonus + mode_bonus
+                    if score > best_score:
+                        best_score = score
+                        best_rects = rects
+
+        return best_rects
+
+    def _slot_mosaic_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        if not self.items:
+            return []
+
+        def _adaptive_span_for_ratio(ratio: float) -> tuple[int, int]:
+            if 0.92 <= ratio <= 1.08:
+                return (1, 1)
+            candidates = [(1, 1), (2, 1), (3, 1), (3, 2), (4, 3), (1, 2), (1, 3), (2, 3), (3, 4)]
+            best_span = (1, 1)
+            best_cost = float("inf")
+            wants_landscape = ratio > 1.0
+            for span_w, span_h in candidates:
+                span_ratio = span_w / max(1, span_h)
+                area = span_w * span_h
+                cost = abs(math.log(max(0.05, ratio) / max(0.05, span_ratio)))
+                cost += max(0, area - 2) * 0.035
+                if wants_landscape and span_w <= span_h:
+                    cost += 0.42
+                if not wants_landscape and span_h <= span_w:
+                    cost += 0.42
+                if (wants_landscape and (span_w, span_h) == (2, 1)) or (
+                    not wants_landscape and (span_w, span_h) == (1, 2)
+                ):
+                    cost -= 0.06
+                if cost < best_cost:
+                    best_cost = cost
+                    best_span = (span_w, span_h)
+            return best_span
+
+        adaptive_spans: list[tuple[int, int]] = []
+        review_spans: list[tuple[int, int]] = []
+        gentle_spans: list[tuple[int, int]] = []
+        for item in self.items:
+            ratio = item.width / max(1, item.height)
+            adaptive_spans.append(_adaptive_span_for_ratio(ratio))
+            if ratio >= 2.35:
+                review_spans.append((3, 1))
+            elif ratio >= 1.08:
+                review_spans.append((2, 1))
+            elif ratio <= 0.43:
+                review_spans.append((1, 3))
+            elif ratio <= 0.92:
+                review_spans.append((1, 2))
+            else:
+                review_spans.append((1, 1))
+
+            if ratio >= 1.38:
+                gentle_spans.append((2, 1))
+            elif ratio <= 0.72:
+                gentle_spans.append((1, 2))
+            else:
+                gentle_spans.append((1, 1))
+
+        return self._pack_span_mosaic_rects(
+            [
+                (review_spans, 0.55),
+                (adaptive_spans, 0.35),
+                (gentle_spans, 0.25),
+            ],
+            total_w,
+            total_h,
+        )
+
+    def _orientation_mosaic_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        count = len(self.items)
+        if count <= 0:
+            return []
+
+        ratios = [max(0.05, item.width / max(1, item.height)) for item in self.items]
+        units: list[dict] = []
+        made_pair = False
+        idx = 0
+        while idx < count:
+            ratio = ratios[idx]
+            is_landscape = ratio >= 1.25
+            is_portrait = ratio <= 0.80
+            if idx + 1 < count:
+                next_ratio = ratios[idx + 1]
+                next_landscape = next_ratio >= 1.25
+                next_portrait = next_ratio <= 0.80
+                if is_landscape and next_portrait:
+                    portrait_w = min(0.95, max(0.34, next_ratio))
+                    land_h = portrait_w
+                    land_w = max(0.35, ratio * land_h)
+                    unit_w = land_w + portrait_w
+                    units.append(
+                        {
+                            "ratio": unit_w,
+                            "parts": [
+                                (idx, 0.0, 0.0, land_w, land_h),
+                                (idx + 1, land_w, 0.0, unit_w, 1.0),
+                            ],
+                        }
+                    )
+                    made_pair = True
+                    idx += 2
+                    continue
+                if is_portrait and next_landscape:
+                    portrait_w = min(0.95, max(0.34, ratio))
+                    land_h = portrait_w
+                    land_w = max(0.35, next_ratio * land_h)
+                    unit_w = portrait_w + land_w
+                    units.append(
+                        {
+                            "ratio": unit_w,
+                            "parts": [
+                                (idx, 0.0, 0.0, portrait_w, 1.0),
+                                (idx + 1, portrait_w, 0.0, unit_w, land_h),
+                            ],
+                        }
+                    )
+                    made_pair = True
+                    idx += 2
+                    continue
+
+            units.append({"ratio": ratio, "parts": [(idx, 0.0, 0.0, ratio, 1.0)]})
+            idx += 1
+
+        if not made_pair:
+            return []
+
+        unit_count = len(units)
+        prefix_ratio = [0.0]
+        for unit in units:
+            prefix_ratio.append(prefix_ratio[-1] + float(unit["ratio"]))
+
+        min_target_h = max(96.0, min(total_h * 0.13, 190.0))
+        max_target_h = max(min_target_h + 24.0, min(total_h * 0.62, 460.0))
+        max_units_per_row = min(unit_count, 8)
+        best_cost = float("inf")
+        best_partitions: list[tuple[int, int]] = []
+        best_heights: list[float] = []
+
+        target_h = min_target_h
+        while target_h <= max_target_h + 0.1:
+            dp = [float("inf")] * (unit_count + 1)
+            prev = [-1] * (unit_count + 1)
+            row_h_at = [0.0] * (unit_count + 1)
+            dp[0] = 0.0
+
+            for end in range(1, unit_count + 1):
+                for start in range(max(0, end - max_units_per_row), end):
+                    if dp[start] == float("inf"):
+                        continue
+                    ratio_sum = prefix_ratio[end] - prefix_ratio[start]
+                    if ratio_sum <= 0:
+                        continue
+                    row_h = total_w / ratio_sum
+                    units_in_row = end - start
+                    cost = dp[start]
+                    cost += ((row_h - target_h) / max(1.0, target_h)) ** 2
+                    if row_h < 90:
+                        cost += ((90 - row_h) / 90) ** 2 * 5.0
+                    if row_h > target_h * 2.25:
+                        cost += ((row_h / max(1.0, target_h)) - 2.25) ** 2 * 0.8
+                    if units_in_row == 1 and unit_count > 2:
+                        cost += 0.35
+                    if cost < dp[end]:
+                        dp[end] = cost
+                        prev[end] = start
+                        row_h_at[end] = row_h
+
+            if dp[unit_count] == float("inf"):
+                target_h += 10.0
+                continue
+
+            partitions: list[tuple[int, int]] = []
+            heights: list[float] = []
+            end = unit_count
+            while end > 0:
+                start = prev[end]
+                if start < 0:
+                    partitions = []
+                    break
+                partitions.append((start, end))
+                heights.append(row_h_at[end])
+                end = start
+            partitions.reverse()
+            heights.reverse()
+            if not partitions:
+                target_h += 10.0
+                continue
+
+            natural_h = sum(heights)
+            blank_ratio = max(0.0, total_h - natural_h) / max(1.0, total_h)
+            overflow_ratio = max(0.0, natural_h - total_h) / max(1.0, total_h)
+            if overflow_ratio > 0.03:
+                target_h += 10.0
+                continue
+            avg_h = natural_h / max(1, len(heights))
+            variance = sum(((h - avg_h) / max(1.0, avg_h)) ** 2 for h in heights) / max(1, len(heights))
+            total_cost = dp[unit_count] * 0.35 + blank_ratio * 2.4 + overflow_ratio * 7.0
+            total_cost += abs(natural_h - total_h) / max(1.0, total_h) * 1.1
+            total_cost += variance * 0.8
+            if total_cost < best_cost:
+                best_cost = total_cost
+                best_partitions = partitions
+                best_heights = heights
+
+            target_h += 10.0
+
+        if not best_partitions:
+            return []
+
+        rects_by_idx: list[Optional[tuple[int, int, int, int]]] = [None] * count
+        y = 0
+        for row_idx, (start, end) in enumerate(best_partitions):
+            row_h = max(1, int(round(best_heights[row_idx])))
+            row_ratios = [float(unit["ratio"]) for unit in units[start:end]]
+            unit_widths = [max(1, int(round(row_h * ratio))) for ratio in row_ratios]
+            width_fix = total_w - sum(unit_widths)
+            if unit_widths:
+                unit_widths[-1] = max(1, unit_widths[-1] + width_fix)
+
+            x = 0
+            for unit_offset, unit_w in enumerate(unit_widths):
+                unit = units[start + unit_offset]
+                norm_w = max(0.01, float(unit["ratio"]))
+                scale_x = unit_w / norm_w
+                x_limit = total_w if unit_offset == len(unit_widths) - 1 else min(total_w, x + unit_w)
+                for item_idx, lx0, ly0, lx1, ly1 in unit["parts"]:
+                    x0 = min(total_w, x + int(round(lx0 * scale_x)))
+                    y0 = min(total_h, y + int(round(ly0 * row_h)))
+                    x1 = min(total_w, x + int(round(lx1 * scale_x)))
+                    y1 = min(total_h, y + int(round(ly1 * row_h)))
+                    if x1 <= x0:
+                        x1 = min(total_w, x0 + 1)
+                    if y1 <= y0:
+                        y1 = min(total_h, y0 + 1)
+                    rects_by_idx[item_idx] = (x0, y0, x1, y1)
+                x = x_limit
+            y += row_h
+
+        if any(rect is None for rect in rects_by_idx):
+            return []
+        return [rect for rect in rects_by_idx if rect is not None]
+
+    def _short_side_balanced_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        count = len(self.items)
+        if count <= 0:
+            return []
+
+        ratios = [max(0.05, item.width / max(1, item.height)) for item in self.items]
+        viewport_area = max(1.0, total_w * total_h)
+        ideal_area = viewport_area / max(1, count)
+        readable_short = max(58.0, min(132.0, math.sqrt(ideal_area) * 0.52))
+        short_values = sorted(
+            {
+                max(42.0, readable_short * factor)
+                for factor in (0.78, 0.88, 0.98, 1.08, 1.18, 1.30, 1.44)
+            },
+            reverse=True,
+        )
+        max_items_per_row = min(count, 10)
+        best_rects: list[tuple[int, int, int, int]] = []
+        best_score = -1_000_000.0
+
+        for short_side in short_values:
+            base_widths: list[float] = []
+            base_heights: list[float] = []
+            for ratio in ratios:
+                if ratio >= 1.0:
+                    base_widths.append(short_side * ratio)
+                    base_heights.append(short_side)
+                else:
+                    base_widths.append(short_side)
+                    base_heights.append(short_side / ratio)
+
+            dp = [float("inf")] * (count + 1)
+            prev = [-1] * (count + 1)
+            row_scale_at = [1.0] * (count + 1)
+            dp[0] = 0.0
+
+            for end in range(1, count + 1):
+                for start in range(max(0, end - max_items_per_row), end):
+                    if dp[start] == float("inf"):
+                        continue
+                    row_w = sum(base_widths[start:end])
+                    if row_w <= 0:
+                        continue
+                    row_scale = min(1.0, total_w / row_w)
+                    # 缩得太狠会重新制造“竖图很窄”的问题，因此宁可多分一行。
+                    if row_scale < 0.90:
+                        continue
+                    scaled_w = row_w * row_scale
+                    row_h = max(base_heights[start:end]) * row_scale
+                    items_in_row = end - start
+                    width_blank = max(0.0, total_w - scaled_w) / max(1.0, total_w)
+                    shrink_penalty = max(0.0, 1.0 - row_scale)
+
+                    row_cost = width_blank * width_blank * 2.4 + shrink_penalty * shrink_penalty * 8.0
+                    if items_in_row == 1 and count > 3:
+                        row_cost += 0.8
+                    if items_in_row >= 9:
+                        row_cost += (items_in_row - 8) * 0.18
+                    if row_h < readable_short:
+                        row_cost += ((readable_short - row_h) / readable_short) ** 2 * 1.2
+
+                    total_cost = dp[start] + row_cost
+                    if total_cost < dp[end]:
+                        dp[end] = total_cost
+                        prev[end] = start
+                        row_scale_at[end] = row_scale
+
+            if dp[count] == float("inf"):
+                continue
+
+            rows: list[tuple[int, int, float, list[float]]] = []
+            end = count
+            while end > 0:
+                start = prev[end]
+                if start < 0:
+                    rows = []
+                    break
+                scale = row_scale_at[end]
+                widths = [max(1.0, w * scale) for w in base_widths[start:end]]
+                row_h = max(max(base_heights[start:end]) * scale, 1.0)
+                rows.append((start, end, row_h, widths))
+                end = start
+            rows.reverse()
+            if not rows:
+                continue
+
+            natural_h = sum(row[2] for row in rows)
+            if natural_h <= 0:
+                continue
+            y_scale = min(1.0, total_h / natural_h)
+            if y_scale < 0.86:
+                continue
+
+            rects: list[tuple[int, int, int, int]] = []
+            y = 0
+            for _start, _end, row_h_float, widths_float in rows:
+                row_h = max(1, int(round(row_h_float * y_scale)))
+                draw_widths = [max(1, int(round(w * y_scale))) for w in widths_float]
+                used_w = sum(draw_widths)
+                gap = max(0, total_w - used_w) / max(1, len(draw_widths))
+                x_float = 0.0
+                for idx, draw_w in enumerate(draw_widths):
+                    cell_w = draw_w + int(round(gap))
+                    x0 = int(round(x_float))
+                    x1 = total_w if idx == len(draw_widths) - 1 else min(total_w, x0 + max(1, cell_w))
+                    y1 = min(total_h, y + row_h)
+                    rects.append((x0, y, x1, y1))
+                    x_float = x1
+                y += row_h
+
+            rects = rects[:count]
+            if len(rects) != count:
+                continue
+            score = self._layout_quality_score(rects, total_w, total_h)
+            if score > best_score:
+                best_score = score
+                best_rects = rects
+
+        return best_rects
+
+    def _area_balanced_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
+        count = len(self.items)
+        if count <= 0:
+            return []
+
+        ratios = [max(0.05, item.width / max(1, item.height)) for item in self.items]
+        viewport_area = max(1.0, total_w * total_h)
+        max_items_per_row = min(count, 12)
+        best_cost = float("inf")
+        best_rows: list[tuple[int, int, float, list[float], list[float]]] = []
+
+        for area_factor in (0.42, 0.48, 0.54, 0.60, 0.66, 0.72):
+            target_area = viewport_area / max(1, count) * area_factor
+            base_widths = [math.sqrt(target_area * ratio) for ratio in ratios]
+            base_heights = [math.sqrt(target_area / ratio) for ratio in ratios]
+            dp = [float("inf")] * (count + 1)
+            prev = [-1] * (count + 1)
+            row_scale_at = [1.0] * (count + 1)
+            dp[0] = 0.0
+
+            for end in range(1, count + 1):
+                for start in range(max(0, end - max_items_per_row), end):
+                    if dp[start] == float("inf"):
+                        continue
+                    row_w = sum(base_widths[start:end])
+                    if row_w <= 0:
+                        continue
+                    row_scale = min(total_w / row_w, 1.32)
+                    scaled_w = row_w * row_scale
+                    row_h = max(base_heights[start:end]) * row_scale
+                    items_in_row = end - start
+                    width_blank = max(0.0, total_w - scaled_w) / max(1.0, total_w)
+                    width_overflow = max(0.0, scaled_w - total_w) / max(1.0, total_w)
+                    row_cost = width_blank * 0.8 + width_overflow * 4.0
+                    if items_in_row == 1 and count > 3:
+                        row_cost += 0.75
+                    if row_h < 70:
+                        row_cost += ((70 - row_h) / 70) ** 2 * 3.0
+                    total_cost = dp[start] + row_cost
+                    if total_cost < dp[end]:
+                        dp[end] = total_cost
+                        prev[end] = start
+                        row_scale_at[end] = row_scale
+
+            if dp[count] == float("inf"):
+                continue
+
+            rows: list[tuple[int, int, float, list[float], list[float]]] = []
+            end = count
+            while end > 0:
+                start = prev[end]
+                if start < 0:
+                    rows = []
+                    break
+                scale = row_scale_at[end]
+                widths = [w * scale for w in base_widths[start:end]]
+                heights = [h * scale for h in base_heights[start:end]]
+                rows.append((start, end, max(heights), widths, heights))
+                end = start
+            rows.reverse()
+            if not rows:
+                continue
+
+            natural_h = sum(row[2] for row in rows)
+            blank_ratio = max(0.0, total_h - natural_h) / max(1.0, total_h)
+            overflow_ratio = max(0.0, natural_h - total_h) / max(1.0, total_h)
+            if overflow_ratio > 0.12:
+                continue
+            fit_cost = dp[count] + blank_ratio * 1.2 + overflow_ratio * 5.2
+            if fit_cost < best_cost:
+                best_cost = fit_cost
+                best_rows = rows
+
+        if not best_rows:
+            return []
+
+        total_rows_h = sum(row[2] for row in best_rows)
+        y_scale = min(1.0, total_h / max(1.0, total_rows_h))
+        rects: list[tuple[int, int, int, int]] = []
+        y = 0
+        for _start, _end, row_h_float, widths_float, heights_float in best_rows:
+            row_h = max(1, int(round(row_h_float * y_scale)))
+            draw_widths = [max(1, int(round(w * y_scale))) for w in widths_float]
+            used_w = sum(draw_widths)
+            gap = max(0, total_w - used_w) / max(1, len(draw_widths))
+            x_float = 0.0
+            for idx, draw_w in enumerate(draw_widths):
+                cell_w = draw_w + int(round(gap))
+                x0 = int(round(x_float))
+                x1 = total_w if idx == len(draw_widths) - 1 else min(total_w, x0 + max(1, cell_w))
+                y1 = min(total_h, y + row_h)
+                rects.append((x0, y, x1, y1))
+                x_float = x1
+            y += row_h
+
+        return rects[:count]
+
     def _resize_frame(self, src: Image.Image, target_w: int, target_h: int) -> Image.Image:
         target_w = max(1, target_w)
         target_h = max(1, target_h)
@@ -945,6 +1718,34 @@ class GroupWindow:
 
     def gif_item_count(self) -> int:
         return sum(1 for item in self.items if item.is_gif and item.gif_frames)
+
+    def _render_slice_budget_ms(self) -> float:
+        gif_count = self.gif_item_count()
+        if gif_count >= 45:
+            return 4.0
+        if gif_count >= 25:
+            return 6.0
+        return 9.0
+
+    def _render_slice_batch(self, default: int) -> int:
+        gif_count = self.gif_item_count()
+        if gif_count >= 45:
+            return 1
+        if gif_count >= 25:
+            return min(default, 2)
+        if gif_count >= 12:
+            return min(default, 4)
+        return default
+
+    def _render_slice_delay_ms(self) -> int:
+        gif_count = self.gif_item_count()
+        if gif_count >= 45:
+            return 10
+        if gif_count >= 25:
+            return 6
+        if gif_count >= 12:
+            return 3
+        return 1
 
     def _index_from_xy(self, x: int, y: int) -> Optional[int]:
         if not self.items:
@@ -1180,8 +1981,13 @@ class GroupWindow:
     def _render_static_batch(self, rects: list[tuple[int, int, int, int]], token: int, start: int, batch: int = 8) -> None:
         if token != self._static_render_token:
             return
-        end = min(len(self.items), start + batch)
-        for idx in range(start, end):
+        slice_start = time.perf_counter()
+        slice_budget_ms = self._render_slice_budget_ms()
+        effective_batch = max(1, self._render_slice_batch(batch))
+        end = start
+        for idx in range(start, len(self.items)):
+            if idx >= len(rects):
+                break
             item = self.items[idx]
             x0, y0, x1, y1 = rects[idx]
             cell_w = max(1, x1 - x0)
@@ -1205,16 +2011,24 @@ class GroupWindow:
             cy = y0 + cell_h // 2
             image_id = self.canvas.create_image(cx, cy, image=tk_img)
             self._slot_image_ids[idx] = image_id
+            end = idx + 1
+
+            elapsed_ms = (time.perf_counter() - slice_start) * 1000
+            if end - start >= effective_batch or elapsed_ms >= slice_budget_ms:
+                break
 
         self._redraw_overlays()
         if end < len(self.items):
-            self._render_batch_after_id = self.top.after(1, lambda: self._render_static_batch(rects, token, end, batch))
+            delay_ms = self._render_slice_delay_ms()
+            self._render_batch_after_id = self.top.after(delay_ms, lambda: self._render_static_batch(rects, token, end, batch))
         else:
             self._render_batch_after_id = None
 
     def _compute_layout_rects(self, total_w: int, total_h: int) -> list[tuple[int, int, int, int]]:
         if self.smart_layout:
-            if self.layout_algorithm == "justified":
+            if self.layout_algorithm == "balanced":
+                rects = self._balanced_layout_rects(total_w, total_h)
+            elif self.layout_algorithm == "justified":
                 rects = self._justified_layout_rects(total_w, total_h)
             else:
                 rects = self._smart_layout_rects(total_w, total_h)
@@ -1312,35 +2126,39 @@ class GroupWindow:
         self._redraw_overlays()
         self._render_static_batch(rects, token, 0, batch=10)
 
+    def _refresh_gif_slot(self, idx: int) -> bool:
+        if len(self._slot_image_ids) != len(self.items):
+            return False
+        if idx < 0 or idx >= len(self.items):
+            return False
+        item = self.items[idx]
+        if not item.is_gif or not item.gif_frames:
+            return False
+
+        draw_w, draw_h = self._slot_draw_sizes[idx]
+        image_id = self._slot_image_ids[idx]
+        if draw_w <= 0 or draw_h <= 0 or not image_id:
+            return False
+        frame_idx = item.gif_index
+        frame = item.gif_frames[frame_idx]
+        tk_img = self._photo_for(item, frame_idx, frame, draw_w, draw_h)
+        self._image_refs[idx] = tk_img
+        self.canvas.itemconfigure(image_id, image=tk_img)
+        return True
+
     def _refresh_gif_slots(self, changed_indexes: list[int]) -> None:
         if not changed_indexes:
             return
-        if len(self._slot_image_ids) != len(self.items):
-            return
 
         for idx in changed_indexes:
-            if idx < 0 or idx >= len(self.items):
-                continue
-            item = self.items[idx]
-            if not item.is_gif or not item.gif_frames:
-                continue
-
-            draw_w, draw_h = self._slot_draw_sizes[idx]
-            image_id = self._slot_image_ids[idx]
-            if draw_w <= 0 or draw_h <= 0 or not image_id:
-                continue
-            frame_idx = item.gif_index
-            frame = item.gif_frames[frame_idx]
-            tk_img = self._photo_for(item, frame_idx, frame, draw_w, draw_h)
-            self._image_refs[idx] = tk_img
-            self.canvas.itemconfigure(image_id, image=tk_img)
+            self._refresh_gif_slot(idx)
 
     def render(self, force: bool = False) -> None:
         total_w = self.canvas.winfo_width()
         total_h = self.canvas.winfo_height()
         if total_w <= 1 or total_h <= 1:
             return
-        if time.time() < self._resizing_until:
+        if time.time() < self._resizing_until and not force:
             return
 
         size_changed = (total_w, total_h) != self._last_layout_size
@@ -1373,7 +2191,7 @@ class GroupWindow:
             item.next_due = now + item.gif_durations[item.gif_index] / 1000
         return changed
 
-    def tick_gif(self, now: float, frame_budget: int = 18) -> int:
+    def tick_gif(self, now: float, frame_budget: int = 18, time_budget_ms: Optional[float] = None) -> int:
         if not self.items or frame_budget <= 0 or now < self._resizing_until:
             return 0
 
@@ -1384,24 +2202,31 @@ class GroupWindow:
         start = self._gif_round_robin_start % len(gif_indexes)
         ordered = gif_indexes[start:] + gif_indexes[:start]
 
-        changed_indexes: list[int] = []
+        slice_start = time.perf_counter()
+        updated = 0
+        scanned = 0
         for idx in ordered:
-            if len(changed_indexes) >= frame_budget:
+            if updated >= frame_budget or time.time() < self._resizing_until:
                 break
+            scanned += 1
             item = self.items[idx]
             if self._advance_gif_to_now(item, now):
-                changed_indexes.append(idx)
+                if self._refresh_gif_slot(idx):
+                    updated += 1
+                if time_budget_ms is not None and updated > 0:
+                    elapsed_ms = (time.perf_counter() - slice_start) * 1000
+                    if elapsed_ms >= time_budget_ms:
+                        break
 
-        self._gif_round_robin_start = (start + max(1, len(changed_indexes))) % len(gif_indexes)
-        self._refresh_gif_slots(changed_indexes)
-        return len(changed_indexes)
+        self._gif_round_robin_start = (start + max(1, scanned)) % len(gif_indexes)
+        return updated
 
 
 class PicReadApp:
     def __init__(self) -> None:
         self._enable_dpi_awareness()
         self.root = tk.Tk()
-        self.root.title("PicRead - 多窗口组平铺看图")
+        self.root.title(f"PicRead v{APP_VERSION} - 多窗口组平铺看图")
         self._icon_ref: Optional[ImageTk.PhotoImage] = None
         self._init_app_icon()
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
@@ -1425,7 +2250,7 @@ class PicReadApp:
         if self.language_code not in LANGUAGE_OPTIONS:
             self.language_code = "zh_CN"
         self._i18n = self._load_i18n(self.language_code)
-        self.root.title(self.tr("app.title", "PicRead - 多窗口组平铺看图"))
+        self.root.title(self.tr("app.title", f"PicRead v{APP_VERSION} - 多窗口组平铺看图"))
         self._last_tick_updated = 0
         self._last_status_refresh = 0.0
         self.drag_drop_enabled = False
@@ -1574,6 +2399,10 @@ class PicReadApp:
     def language_label(self, code: str) -> str:
         return LANGUAGE_OPTIONS.get(code, code)
 
+    def batch_order_label(self, key: str) -> str:
+        safe_key = key if key in BATCH_ORDER_OPTIONS else "normal"
+        return self.tr(f"batch_order.{safe_key}", BATCH_ORDER_OPTIONS[safe_key])
+
     def _save_ui_state(self) -> None:
         geom_items = list(self._template_geometry_map.items())[:300]
         data = {
@@ -1581,6 +2410,7 @@ class PicReadApp:
             "perf_mode": self.perf_mode_var.get() if hasattr(self, "perf_mode_var") else "平衡",
             "load_profile": self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载",
             "language": self.language_code,
+            "batch_import_order": self.batch_order_var.get() if hasattr(self, "batch_order_var") else "normal",
             "template_geometry_map": dict(geom_items),
         }
         try:
@@ -1595,7 +2425,7 @@ class PicReadApp:
 
         self.head_label = ttk.Label(
             root_frame,
-            text=self.tr("app.header", "PicRead | 多窗口组平铺看图"),
+            text=self.tr("app.header", f"PicRead v{APP_VERSION} | 多窗口组平铺看图"),
             font=("Microsoft YaHei UI", 14, "bold"),
         )
         self.head_label.pack(anchor="w")
@@ -1618,6 +2448,8 @@ class PicReadApp:
         group_row1.pack(fill=tk.X, anchor="w")
         group_row2 = ttk.Frame(control)
         group_row2.pack(fill=tk.X, anchor="w", pady=(12, 0))
+        group_row3 = ttk.Frame(control)
+        group_row3.pack(fill=tk.X, anchor="w", pady=(12, 0))
 
         self.lbl_group_name = ttk.Label(group_row1, text=self.tr("control.group_name", "窗口组名:"))
         self.lbl_group_name.pack(side=tk.LEFT)
@@ -1646,7 +2478,7 @@ class PicReadApp:
         self.smart_layout_check.pack(side=tk.LEFT, padx=(0, 22))
         self.lbl_algorithm = ttk.Label(group_row1, text=self.tr("control.algorithm", "算法:"))
         self.lbl_algorithm.pack(side=tk.LEFT)
-        self.layout_algo_var = tk.StringVar(value="legacy")
+        self.layout_algo_var = tk.StringVar(value="balanced")
         self.layout_algo_combo = ttk.Combobox(
             group_row1,
             textvariable=self.layout_algo_var,
@@ -1655,8 +2487,8 @@ class PicReadApp:
             width=17,
         )
         self.layout_algo_combo.pack(side=tk.LEFT, padx=(6, 0))
-        self.layout_algo_combo.bind("<<ComboboxSelected>>", lambda _e: self._sync_layout_algo_value())
-        self._sync_layout_algo_value("legacy")
+        self.layout_algo_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_layout_algo_change())
+        self._sync_layout_algo_value("balanced")
 
         self.lbl_perf_mode = ttk.Label(group_row2, text=self.tr("control.perf_mode", "性能模式:"))
         self.lbl_perf_mode.pack(side=tk.LEFT)
@@ -1694,6 +2526,24 @@ class PicReadApp:
         )
         self.language_combo.pack(side=tk.LEFT, padx=(6, 20))
         self.language_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_language_change())
+
+        self.lbl_batch_order = ttk.Label(group_row3, text=self.tr("control.batch_order", "批量导入顺序:"))
+        self.lbl_batch_order.pack(side=tk.LEFT)
+        default_batch_order = str(self._ui_state.get("batch_import_order", "normal"))
+        if default_batch_order not in BATCH_ORDER_OPTIONS:
+            default_batch_order = "normal"
+        self.batch_order_var = tk.StringVar(value=default_batch_order)
+        self.batch_order_display_var = tk.StringVar()
+        self.batch_order_combo = ttk.Combobox(
+            group_row3,
+            textvariable=self.batch_order_display_var,
+            values=[],
+            state="readonly",
+            width=10,
+        )
+        self.batch_order_combo.pack(side=tk.LEFT, padx=(6, 20))
+        self.batch_order_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_batch_order_change())
+
         group_actions = ttk.Frame(group_row2)
         group_actions.pack(side=tk.LEFT, padx=(8, 0))
         self.tuning_btn = ttk.Button(
@@ -1851,6 +2701,7 @@ class PicReadApp:
         )
         self._refresh_perf_mode_options()
         self._refresh_load_profile_options()
+        self._refresh_batch_order_options()
         self._apply_dark_widget_styles()
         self._refresh_window_texts()
 
@@ -1974,13 +2825,22 @@ class PicReadApp:
     def _layout_algo_key_from_var(self) -> str:
         raw = self.layout_algo_var.get().strip() if hasattr(self, "layout_algo_var") else "legacy"
         match = re.search(r"\(([^()]+)\)\s*$", raw)
-        key = match.group(1).strip() if match else raw
+        key = (match.group(1).strip() if match else raw).lower()
         return key if key in LAYOUT_ALGORITHMS else "legacy"
 
     def _sync_layout_algo_value(self, key: Optional[str] = None) -> None:
         safe_key = key or self._layout_algo_key_from_var()
         if hasattr(self, "layout_algo_var"):
             self.layout_algo_var.set(self._layout_algo_label(safe_key))
+
+    def _on_layout_algo_change(self) -> None:
+        self._sync_layout_algo_value()
+        if hasattr(self, "smart_layout_var"):
+            self.smart_layout_var.set(True)
+        g = self._selected_group()
+        if g is None:
+            return
+        self._apply_layout_to_group(g)
 
     def _refresh_perf_mode_options(self) -> None:
         values = [self.perf_mode_label(key) for key in PERF_MODES]
@@ -1993,6 +2853,15 @@ class PicReadApp:
         self.load_profile_combo.configure(values=values)
         current = self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
         self.load_profile_display_var.set(self.load_profile_label(current))
+
+    def _refresh_batch_order_options(self) -> None:
+        values = [self.batch_order_label(key) for key in BATCH_ORDER_OPTIONS]
+        self.batch_order_combo.configure(values=values)
+        current = self.batch_order_var.get() if hasattr(self, "batch_order_var") else "normal"
+        if current not in BATCH_ORDER_OPTIONS:
+            current = "normal"
+            self.batch_order_var.set(current)
+        self.batch_order_display_var.set(self.batch_order_label(current))
 
     def _perf_mode_key_from_display(self) -> str:
         raw = self.perf_mode_display_var.get().strip()
@@ -2007,6 +2876,17 @@ class PicReadApp:
             if raw == self.load_profile_label(key):
                 return key
         return self.load_profile_var.get() if hasattr(self, "load_profile_var") else "低负载"
+
+    def _batch_order_key_from_display(self) -> str:
+        raw = self.batch_order_display_var.get().strip()
+        for key in BATCH_ORDER_OPTIONS:
+            if raw == self.batch_order_label(key):
+                return key
+        return self.batch_order_var.get() if hasattr(self, "batch_order_var") else "normal"
+
+    def _on_batch_order_change(self) -> None:
+        self.batch_order_var.set(self._batch_order_key_from_display())
+        self._save_ui_state()
 
     def _on_language_change(self) -> None:
         selected = self.language_display_var.get().strip()
@@ -2023,8 +2903,8 @@ class PicReadApp:
         old_default_names = {"窗口组", "Window Group"}
         if self.group_name_var.get().strip() in old_default_names:
             self.group_name_var.set(self._default_group_name())
-        self.root.title(self.tr("app.title", "PicRead - 多窗口组平铺看图"))
-        self.head_label.configure(text=self.tr("app.header", "PicRead | 多窗口组平铺看图"))
+        self.root.title(self.tr("app.title", f"PicRead v{APP_VERSION} - 多窗口组平铺看图"))
+        self.head_label.configure(text=self.tr("app.header", f"PicRead v{APP_VERSION} | 多窗口组平铺看图"))
         self.notebook.tab(0, text=self.tr("tab.groups", "窗口组"))
         self.notebook.tab(1, text=self.tr("tab.templates", "模板库"))
         self.notebook.tab(2, text=self.tr("tab.history", "历史记录"))
@@ -2036,6 +2916,7 @@ class PicReadApp:
         self.lbl_perf_mode.configure(text=self.tr("control.perf_mode", "性能模式:"))
         self.lbl_load.configure(text=self.tr("control.load_profile", "负载:"))
         self.lbl_language.configure(text=self.tr("control.language", "语言:"))
+        self.lbl_batch_order.configure(text=self.tr("control.batch_order", "批量导入顺序:"))
         self.tuning_btn.configure(text=self.tr("control.tuning_panel", "调参面板"))
         self.group_list_menu.entryconfigure(0, label=self.tr("menu.pin_toggle", "置顶/取消置顶"))
         self.apply_layout_btn.configure(text=self.tr("button.apply_layout", "应用布局"))
@@ -2062,6 +2943,7 @@ class PicReadApp:
         self.language_display_var.set(self.language_label(self.language_code))
         self._refresh_perf_mode_options()
         self._refresh_load_profile_options()
+        self._refresh_batch_order_options()
         self._sync_layout_algo_value(self._layout_algo_key_from_var())
         self._update_template_context_label()
         self.refresh_template_library()
@@ -2197,10 +3079,23 @@ class PicReadApp:
 
         return paths
 
-    def add_paths_to_group(self, group: GroupWindow, paths: list[Path], show_errors: bool = True) -> None:
+    def _order_batch_paths(self, paths: list[Path]) -> list[Path]:
+        order = self.batch_order_var.get() if hasattr(self, "batch_order_var") else "normal"
+        ordered = list(paths)
+        if order == "reverse":
+            ordered.reverse()
+        return ordered
+
+    def add_paths_to_group(
+        self,
+        group: GroupWindow,
+        paths: list[Path],
+        show_errors: bool = True,
+        apply_batch_order: bool = False,
+    ) -> None:
         if not paths:
             return
-        group.add_paths(paths, show_errors=show_errors)
+        group.add_paths(self._order_batch_paths(paths) if apply_batch_order else paths, show_errors=show_errors)
         self._refresh_list(select_gid=group.group_id)
 
     def _on_drop_to_main(self, files) -> None:
@@ -2217,14 +3112,14 @@ class PicReadApp:
             messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_before_drop", "请先创建并选中一个窗口组，再拖入图片。"))
             return
 
-        self.add_paths_to_group(group, paths)
+        self.add_paths_to_group(group, paths, apply_batch_order=True)
 
     def _on_drop_to_group(self, group: GroupWindow, files) -> None:
         paths = self._collect_supported_paths(files)
         if not paths:
             messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.no_supported_images_dropped", "拖入的文件里没有受支持的图片格式。"))
             return
-        self.add_paths_to_group(group, paths)
+        self.add_paths_to_group(group, paths, apply_batch_order=True)
 
     def _dispatch_drop_event(self, group_id: Optional[int], files) -> None:
         if group_id is None:
@@ -3154,14 +4049,9 @@ class PicReadApp:
             messagebox.showwarning(self.tr("msg.notice", "提示"), self.tr("msg.no_supported_images_selected", "没有选中受支持的图片类型。"))
             return
 
-        self.add_paths_to_group(g, normalized)
+        self.add_paths_to_group(g, normalized, apply_batch_order=True)
 
-    def update_layout(self) -> None:
-        g = self._selected_group()
-        if not g:
-            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_in_list", "请先在列表里选择一个窗口组。"))
-            return
-
+    def _apply_layout_to_group(self, g: GroupWindow) -> None:
         rows = max(1, int(self.rows_var.get() or 1))
         smart = bool(self.smart_layout_var.get())
         layout_algorithm = self._layout_algo_key_from_var()
@@ -3170,6 +4060,14 @@ class PicReadApp:
         g._update_title()
         g.set_layout(rows, smart, layout_algorithm=layout_algorithm)
         self._refresh_list(select_gid=g.group_id)
+
+    def update_layout(self) -> None:
+        g = self._selected_group()
+        if not g:
+            messagebox.showinfo(self.tr("msg.notice", "提示"), self.tr("msg.select_group_in_list", "请先在列表里选择一个窗口组。"))
+            return
+
+        self._apply_layout_to_group(g)
 
     def focus_group(self) -> None:
         g = self._selected_group()
@@ -3662,14 +4560,20 @@ class PicReadApp:
             groups_with_gifs = [(g, gif_count) for g, gif_count in groups_with_gifs if gif_count > 0]
             remaining_budget = int(profile["frame_budget"])
             remaining_weight = sum(gif_count for _, gif_count in groups_with_gifs)
+            tick_start = time.perf_counter()
+            max_gif_count = max((gif_count for _, gif_count in groups_with_gifs), default=0)
+            global_time_budget_ms = 8.0 if max_gif_count >= 45 else 12.0
             for idx, (g, gif_count) in enumerate(groups_with_gifs):
                 if remaining_budget <= 0 or remaining_weight <= 0:
+                    break
+                if (time.perf_counter() - tick_start) * 1000 >= global_time_budget_ms:
                     break
                 if idx == len(groups_with_gifs) - 1:
                     allocation = remaining_budget
                 else:
                     allocation = max(1, int(round(remaining_budget * gif_count / remaining_weight)))
-                used = g.tick_gif(now, frame_budget=allocation)
+                group_time_budget_ms = 3.5 if gif_count >= 45 else 5.0 if gif_count >= 25 else 7.0
+                used = g.tick_gif(now, frame_budget=allocation, time_budget_ms=group_time_budget_ms)
                 updated_total += used
                 remaining_budget -= used
                 remaining_weight -= gif_count
