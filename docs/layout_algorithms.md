@@ -1,6 +1,6 @@
 # 排版算法说明
 
-本文档说明 PicRead 当前公开版本里使用的两种主要平铺算法。
+本文档说明 PicRead 当前公开版本里使用的三种主要平铺算法。
 
 ## 设计目标
 这套排版逻辑主要服务于图片与 GIF 审阅，而不是普通相册展示。
@@ -116,4 +116,47 @@ total_cost = dp[count] * 0.35 + blank_ratio * 3.8 + overflow_ratio * 2.4 + short
 
 ## 实际取舍
 在保持顺序、比例、不裁切的前提下，空白不可能永远完全为零。
-这两套算法的意义不是“消灭全部空白”，而是把空白控制在更自然、更适合审阅的方向。
+这些算法的意义不是“消灭全部空白”，而是把空白控制在更自然、更适合审阅的方向。
+
+## 算法 3：审阅尺寸均衡排版
+算法 3 面向横图、竖图、方图混排时的审阅体验。它不再只追求每一行高度一致，而是先生成多种候选布局，再用统一评分选择最适合当前窗口的一种。
+
+它重点解决的问题是：竖图和横图混排时，竖图如果被强行压进普通行高，往往会显得过窄、过小，影响审阅。
+
+核心思路：
+1. 保持原始顺序，不重排文件顺序。
+2. 为横图、竖图、方图生成不同候选矩形。
+3. 对横竖相邻的图片尝试组合成一个审阅单元，让竖图可以获得更高的显示高度。
+4. 用短边、面积、空白、溢出和尺寸一致性做综合评分。
+5. 选出利用率和可读尺寸更平衡的结果。
+
+横竖组合的核心片段：
+```python
+if is_landscape and next_portrait:
+    portrait_w = min(0.95, max(0.34, next_ratio))
+    land_h = portrait_w
+    land_w = max(0.35, ratio * land_h)
+    unit_w = land_w + portrait_w
+    units.append({
+        "ratio": unit_w,
+        "parts": [
+            (idx, 0.0, 0.0, land_w, land_h),
+            (idx + 1, land_w, 0.0, unit_w, 1.0),
+        ],
+    })
+```
+
+候选布局会被统一评分：
+```python
+slot_mosaic_candidate = self._slot_mosaic_layout_rects(total_w, total_h)
+orientation_candidate = self._orientation_mosaic_layout_rects(total_w, total_h)
+short_side_candidate = self._short_side_balanced_layout_rects(total_w, total_h)
+area_candidate = self._area_balanced_layout_rects(total_w, total_h)
+
+best = max(candidates, key=lambda rects: self._layout_quality_score(rects, total_w, total_h))
+```
+
+### 适合场景
+- 横图、竖图、方图比例混杂
+- 竖图在算法 1 / 算法 2 中显得过小
+- 用户更在意“看得清”和整体审阅感，而不是严格行高一致
